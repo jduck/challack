@@ -723,17 +723,20 @@ char *tcp_flags(u_char flags)
  */
 void setterm(int mode)
 {
-	static struct termios foo, boo;
+	static struct termios tmp, old;
+	static int old_set = 0;
 
 	switch(mode) {
 		case 0:
-			tcgetattr(fileno(stdin), &foo);
-			memcpy(&boo, &foo, sizeof(struct termios));
-			foo.c_lflag &= ~ICANON;
-			tcsetattr(fileno(stdin), TCSANOW, &foo);
+			tcgetattr(fileno(stdin), &tmp);
+			memcpy(&old, &tmp, sizeof(struct termios));
+			tmp.c_lflag &= ~ICANON;
+			tcsetattr(fileno(stdin), TCSANOW, &tmp);
+			old_set = 1;
 			break;
 		default:
-			tcsetattr(fileno(stdin), TCSANOW, &boo);
+			if (old_set)
+				tcsetattr(fileno(stdin), TCSANOW, &old);
 			break;
 	}
 }
