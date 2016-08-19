@@ -135,6 +135,14 @@ int main(int argc, char *argv[])
 	memset(&cliaddr, 0, sizeof(cliaddr));
 	if (!lookup_host(argv[3], &cliaddr))
 		return 1;
+	if (argc > 4) {
+		int cliport = atoi(argv[4]);
+		if (cliport < 1 || cliport > 65535) {
+			fprintf(stderr, "[!] %s is not a valid port.\n", argv[4]);
+			return 1;
+		}
+		cliaddr.sin_port = htons(cliport);
+	}
 
 	/* make sure the target port is valid */
 	srvport = atoi(argv[2]);
