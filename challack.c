@@ -72,9 +72,10 @@ typedef struct conn_struct {
 /* prototypes.. */
 int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct sockaddr_in *pcli);
 
-u_short in_cksum(u_short *addr, int len);
+u_short in_cksum(u_short *addr, size_t len);
 void tcp_init(conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_in *pdst, u_long seq);
-int tcp_send(int s, conn_t *pconn, u_char flags, char *data, int len);
+int tcp_craft(void *output, size_t *outlen, conn_t *pconn, u_char flags, char *data, size_t len);
+int tcp_send(int s, conn_t *pconn, u_char flags, char *data, size_t len);
 int tcp_recv(struct pcap_pkthdr *pph, int ipoff, const void *inbuf, u_char *flags, u_long *pack, u_long *pseq, void **pdata, size_t *plen
 #ifdef DEBUG_SEQ
 	, cstate_t conn_state
@@ -467,7 +468,7 @@ void tcp_init(conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_in *pdst,
  * ripped from ping.c, it calulates the checksum of len bytes at addr and
  * returns it.
  */
-u_short in_cksum(u_short *addr, int len)
+u_short in_cksum(u_short *addr, size_t len)
 {
 	register int nleft = len;
 	register u_short *w = addr;
@@ -493,16 +494,23 @@ u_short in_cksum(u_short *addr, int len)
 
 
 /*
+ * craft a TCP packet based on the given parameters
+ *
  * this is based on Matt Barrie's old non-working TCPseqnumpred.c
  * the problem with that program was not this function however..
  */
-int tcp_send(int s, conn_t *pconn, u_char flags, char *data, int len)
+int tcp_craft(void *output, size_t *outlen, conn_t *pconn, u_char flags, char *data, size_t len)
 {
 	struct ip ip;
 	struct tcphdr tcp;
 	char tcpbuf[4096], *ptr;
-	char packet[8192];
 	u_short size;
+
+	/* buffer too small? */
+	if (*outlen < sizeof(ip) + sizeof(tcp) + len) {
+		fprintf(stderr, "tcp_craft: buffer too small!!\n");
+		return 0;
+	}
 
 	/* construct the IP header */
 	ip.ip_hl = sizeof(ip) / 4;
@@ -548,18 +556,45 @@ int tcp_send(int s, conn_t *pconn, u_char flags, char *data, int len)
 	tcp.th_sum = in_cksum((u_short *)tcpbuf, sizeof(tcp) + 12 + len);
 
 	/* build the final packet */
-	ptr = packet;
+	ptr = output;
 	memcpy(ptr, &ip, sizeof(ip));
 	ptr += sizeof(ip);
 	memcpy(ptr, &tcp, sizeof(tcp));
 	ptr += sizeof(tcp);
 	memcpy(ptr, data, len);
 
-	if (sendto(s, packet, sizeof(ip) + sizeof(tcp) + len, 0,
-				(struct sockaddr *)pconn->dst, sizeof(struct sockaddr_in)) == -1) {
+	*outlen = (void *)ptr + len - output;
+
+	return 1;
+}
+
+
+/*
+ * send the specified packet using libpcap
+ */
+int tcp_send_pcap(pcap_t *pch, void *pkt, size_t pktlen)
+{
+	return pcap_sendpacket(pch, pkt, pktlen);
+}
+
+
+/*
+ * craft and send a tcp packet (easy mode)
+ */
+int tcp_send(int s, conn_t *pconn, u_char flags, char *data, size_t len)
+{
+	char packet[8192];
+	size_t pktlen = sizeof(packet);
+
+	if (!tcp_craft(packet, &pktlen, pconn, flags, data, len))
+		return 0;
+
+	if (sendto(s, packet, pktlen, 0, (struct sockaddr *)pconn->dst,
+				sizeof(struct sockaddr_in)) == -1) {
 		perror("[!] sendto() failed");
 		return 0;
 	}
+
 	/* success!! */
 #ifdef DEBUG_SEQ
 	printf("[*] %s : %d --> %d : %s : seq %lu, ack %lu (len %lu)\n",
