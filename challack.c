@@ -414,8 +414,8 @@ int sync_time_with_remote(thctx_t *pctx)
 		}
 
 		else if (chack_cnt[round] < 100) {
-			fprintf(stderr, "[!] invalid number of challenge ACKs! starting over...\n");
-			continue;
+			fprintf(stderr, "[!] invalid number of challenge ACKs! WTF?\n");
+			return 0;
 		}
 
 		/* woot! */
