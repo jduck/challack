@@ -75,7 +75,11 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 u_short in_cksum(u_short *addr, int len);
 void tcp_init(conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_in *pdst, u_long seq);
 int tcp_send(int s, conn_t *pconn, u_char flags, char *data, int len);
-int tcp_recv(struct pcap_pkthdr *pph, int ipoff, const void *inbuf, u_char *flags, u_long *pack, u_long *pseq, void **pdata, size_t *plen);
+int tcp_recv(struct pcap_pkthdr *pph, int ipoff, const void *inbuf, u_char *flags, u_long *pack, u_long *pseq, void **pdata, size_t *plen
+#ifdef DEBUG_SEQ
+	, cstate_t conn_state
+#endif
+	);
 char *tcp_flags(u_char flags);
 
 void setterm(int mode);
@@ -318,15 +322,11 @@ int execute_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct so
 			void *data;
 			size_t datalen;
 
-			if (tcp_recv(pchdr, ipoff, inbuf, &flags, &rack, &rseq, &data, &datalen)) {
+			if (tcp_recv(pchdr, ipoff, inbuf, &flags, &rack, &rseq, &data, &datalen
 #ifdef DEBUG_SEQ
-				//printf("inbuf %p, ptcp %p, ptctp+1 %p, caplen %lu\n", inbuf, ptcp, ptcp+1, (u_long)pchdr->caplen);
-				printf("[*] %s : %d <-- %d : %s : seq %lu, ack %lu (len: %lu)\n",
-						g_conn_states[legit_conn.state],
-						ntohs(ptcp->th_dport), ntohs(ptcp->th_sport),
-					tcp_flags(flags), rseq, rack, datalen);
+						, legit_conn.state
 #endif
-
+						)) {
 				switch (legit_conn.state) {
 
 					case CS_SYN_SENT:
@@ -575,13 +575,16 @@ int tcp_send(int s, conn_t *pconn, u_char flags, char *data, int len)
  * process the packet captured by libpcap. if everything goes well, we return
  * the TCP flags, ack, seq, and data (w/len) to the caller.
  */
-int tcp_recv(struct pcap_pkthdr *pph, int ipoff, const void *inbuf, u_char *flags, u_long *pack, u_long *pseq, void **pdata, size_t *plen)
+int tcp_recv(struct pcap_pkthdr *pph, int ipoff, const void *inbuf, u_char *flags, u_long *pack, u_long *pseq, void **pdata, size_t *plen
+#ifdef DEBUG_SEQ
+		, cstate_t conn_state
+#endif
+		)
 {
 	struct ip *pip;
 	struct tcphdr *ptcp;
 	void *ptr;
 	size_t iplen, tcplen, datalen;
-	u_long rack, rseq;
 
 	if (pph->caplen < ipoff + sizeof(struct ip)) {
 		fprintf(stderr, "[!] tcp_recv: too short to be an IP packet!\n");
@@ -612,6 +615,16 @@ int tcp_recv(struct pcap_pkthdr *pph, int ipoff, const void *inbuf, u_char *flag
 		return 0;
 	}
 	datalen -= (iplen + tcplen);
+
+#ifdef DEBUG_SEQ
+	//printf("inbuf %p, ptcp %p, ptctp+1 %p, caplen %lu\n", inbuf, ptcp, ptcp+1, (u_long)pph->caplen);
+	printf("[*] %s : %d <-- %d : %s : seq %lu, ack %lu (len: %lu)\n",
+			g_conn_states[conn_state],
+			ntohs(ptcp->th_dport), ntohs(ptcp->th_sport),
+			tcp_flags(ptcp->th_flags),
+			(u_long)ntohl((u_long)ptcp->th_seq), (u_long)ntohl((u_long)ptcp->th_ack), datalen);
+#endif
+
 
 	/* save the output parameters and return */
 	if (flags)
