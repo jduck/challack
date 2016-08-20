@@ -93,6 +93,7 @@ typedef struct thctx_struct {
 	packet_t *pkt;
 	int numpkts;
 	suseconds_t delay;
+	u_short winsz; // initial TCP window size
 } thctx_t;
 
 /* global count for challange ACKs received in one period */
@@ -1011,6 +1012,10 @@ int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, u_long *
 		return 0;
 	}
 	ptcp = (struct tcphdr *)ptr;
+	if (!g_ctx.winsz) {
+		g_ctx.winsz = ntohs(ptcp->th_win);
+		printf("[*] TCP Window size: %u\n", g_ctx.winsz);
+	}
 	tcplen = ptcp->th_off * 4;
 	ptr += tcplen;
 	if (pph->caplen < g_ctx.ipoff + iplen + tcplen) {
