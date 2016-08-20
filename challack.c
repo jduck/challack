@@ -116,11 +116,7 @@ uint16_t in_cksum(uint16_t *addr, size_t len);
 void tcp_init(volatile conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_in *pdst, uint32_t seq);
 int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn, u_char flags, char *data, size_t len);
 int tcp_send(pcap_t *pch, volatile conn_t *pconn, u_char flags, char *data, size_t len);
-int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, uint32_t *pack, uint32_t *pseq, void **pdata, size_t *plen
-#ifdef DEBUG_SEQ
-	, cstate_t conn_state
-#endif
-	);
+int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, uint32_t *pack, uint32_t *pseq, void **pdata, size_t *plen);
 char *tcp_flags(u_char flags);
 
 void setterm(int mode);
@@ -346,11 +342,7 @@ void *recv_thread(void *arg)
 	while (1) {
 		pcret = pcap_next_ex(g_ctx.pch, &pchdr, &inbuf);
 		if (pcret == 1
-			&& tcp_recv(pchdr, inbuf, &flags, NULL, NULL, NULL, &datalen
-#ifdef DEBUG_SEQ
-				, g_ctx.conn->state
-#endif
-				)
+			&& tcp_recv(pchdr, inbuf, &flags, NULL, NULL, NULL, &datalen)
 			&& flags == TH_ACK) {
 			g_chack_cnt++;
 		}
@@ -763,11 +755,7 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 			void *data;
 			size_t datalen;
 
-			if (tcp_recv(pchdr, inbuf, &flags, &rack, &rseq, &data, &datalen
-#ifdef DEBUG_SEQ
-						, pconn->state
-#endif
-						)) {
+			if (tcp_recv(pchdr, inbuf, &flags, &rack, &rseq, &data, &datalen)) {
 				switch (pconn->state) {
 
 					case CS_SYN_SENT:
@@ -1012,6 +1000,20 @@ int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn, u_char flags
 
 	*outlen = (void *)ptr + len - output;
 
+#ifdef DEBUG_SEQ
+	{
+		char shost[32], dhost[32];
+
+		strcpy(shost, inet_ntoa(pconn->src->sin_addr));
+		strcpy(dhost, inet_ntoa(pconn->dst->sin_addr));
+		printf("[*] %s : %s:%d --> %s:%d : %s : seq %lu, ack %lu (len %lu)\n",
+				g_conn_states[pconn->state],
+				shost, ntohs(tcp.th_sport),
+				dhost, ntohs(tcp.th_dport),
+				tcp_flags(tcp.th_flags), (u_long)pconn->seq, (u_long)pconn->ack, (u_long)len);
+	}
+#endif
+
 	return 1;
 }
 
@@ -1035,12 +1037,6 @@ int tcp_send(pcap_t *pch, volatile conn_t *pconn, u_char flags, char *data, size
 	}
 
 	/* success!! */
-#ifdef DEBUG_SEQ
-	printf("[*] %s : %d --> %d : %s : seq %lu, ack %lu (len %lu)\n",
-			g_conn_states[pconn->state],
-			ntohs(tcp.th_sport), ntohs(tcp.th_dport),
-			tcp_flags(tcp.th_flags), pconn->seq, pconn->ack, (uint32_t)len);
-#endif
 	return 1;
 }
 
@@ -1049,11 +1045,7 @@ int tcp_send(pcap_t *pch, volatile conn_t *pconn, u_char flags, char *data, size
  * process the packet captured by libpcap. if everything goes well, we return
  * the TCP flags, ack, seq, and data (w/len) to the caller.
  */
-int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, uint32_t *pack, uint32_t *pseq, void **pdata, size_t *plen
-#ifdef DEBUG_SEQ
-		, cstate_t conn_state
-#endif
-		)
+int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, uint32_t *pack, uint32_t *pseq, void **pdata, size_t *plen)
 {
 	struct ip *pip;
 	struct tcphdr *ptcp;
@@ -1095,12 +1087,19 @@ int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, uint32_t
 	datalen -= (iplen + tcplen);
 
 #ifdef DEBUG_SEQ
-	//printf("inbuf %p, ptcp %p, ptctp+1 %p, caplen %lu\n", inbuf, ptcp, ptcp+1, (uint32_t)pph->caplen);
-	printf("[*] %s : %d <-- %d : %s : seq %lu, ack %lu (len: %lu)\n",
-			g_conn_states[conn_state],
-			ntohs(ptcp->th_dport), ntohs(ptcp->th_sport),
-			tcp_flags(ptcp->th_flags),
-			(uint32_t)ntohl((uint32_t)ptcp->th_seq), (uint32_t)ntohl((uint32_t)ptcp->th_ack), datalen);
+	{
+		char shost[32], dhost[32];
+
+		strcpy(shost, inet_ntoa(pip->ip_src));
+		strcpy(dhost, inet_ntoa(pip->ip_dst));
+		//printf("inbuf %p, ptcp %p, ptctp+1 %p, caplen %lu\n", inbuf, ptcp, ptcp+1, (uint32_t)pph->caplen);
+		printf("[*] %s : %s:%d <-- %s:%d : %s : seq %lu, ack %lu (len %lu)\n",
+				g_conn_states[g_ctx.conn_legit.state],
+				dhost, ntohs(ptcp->th_dport),
+				shost, ntohs(ptcp->th_sport),
+				tcp_flags(ptcp->th_flags),
+				(u_long)ntohl(ptcp->th_seq), (u_long)ntohl(ptcp->th_ack), datalen);
+	}
 #endif
 
 
