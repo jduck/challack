@@ -809,7 +809,14 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 
 						/* see if we got data from remote... */
 						if (datalen > 0) {
-							write(fileno(stdout), data, datalen);
+							ssize_t nw;
+
+							nw = write(fileno(stdout), data, datalen);
+							if (nw < 0)
+								perror("[!] write to stdout failed");
+							else if (datalen != (size_t)nw) {
+								fprintf(stderr, "[!] short write!\n");
+							}
 							pconn->ack += datalen;
 							if (!tcp_send(pch, pconn, TH_ACK, NULL, 0))
 								return 1;
@@ -830,7 +837,7 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 
 		/* check for keyboard input */
 		while (kbhit() == 1) {
-			int i, ch = getchar();
+			int ch = getchar();
 
 			switch (ch)
 			{
@@ -856,8 +863,17 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 					break;
 
 				case 0x15: // ^U (NAK)
-					for (i = 0; i < outlen; i++)
-						write(fileno(stdout), "\b \b", 3);
+					{
+						ssize_t nw;
+						static const char *clearline = "\r\033[K";
+
+						nw = write(fileno(stdout), clearline, sizeof(clearline) - 1);
+						if (nw < 0)
+							perror("[!] write to stdout failed");
+						else if (nw != sizeof(clearline) - 1) {
+							fprintf(stderr, "[!] short write!\n");
+						}
+					}
 					outlen = 0;
 					break;
 
