@@ -523,7 +523,7 @@ int conduct_offpath_attack(void)
 		/* stage 2 */
 		} else if (attack_state == AS_TUPLE_INFERENCE) {
 			/*
-			 * send a SYN|ACK to try to illicit a challenge ACK for the
+			 * send a SYN|ACK to try to elicit a challenge ACK for the
 			 * purported connection from our victim.
 			 */
 
