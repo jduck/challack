@@ -96,7 +96,7 @@ typedef struct thctx_struct {
 	u_short winsz; // initial TCP window size
 } thctx_t;
 
-/* global count for challange ACKs received in one period */
+/* global count for challenge ACKs received in one period */
 static volatile int g_chack_cnt = 0;
 /* global context for threads operating on pkts */
 static volatile thctx_t g_ctx;
@@ -716,7 +716,7 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 								return 1;
 							pconn->state = CS_CONNECTED;
 
-							printf("[*] TCP handshack complete! Entering interactive session...\n");
+							printf("[*] TCP handshake complete! Entering interactive session...\n");
 							setterm(0);
 						}
 						break;
