@@ -395,15 +395,26 @@ void wait_until(const char *desc, struct timeval *pstart, time_t sec, suseconds_
 {
 	struct timeval now, diff;
 
-	/* sanity check that we didn't already reach it! */
+	/* sanity check usage... */
+	if (sec != 0 && usec != 0) {
+		fprintf(stderr, "[!] %s : bad usage! specify sec or usec, not both! (%lu && %lu)\n",
+				desc, sec, usec);
+		exit(1); // EWW
+	}
+
+	/* if we already reached the time, we need to adjust... */
 	gettimeofday(&now, NULL);
 	timersub(&now, pstart, &diff);
-	if ((sec != 0 && usec != 0)
-			|| (sec > 0 && diff.tv_sec >= sec)
-			|| (usec > 0 && diff.tv_usec >= usec)) {
-		fprintf(stderr, "[!] %s : bad usage or already reached time (%lu %lu)!!\n",
-				desc, diff.tv_sec, diff.tv_usec);
+
+	if (sec > 0 && diff.tv_sec >= sec) {
+		fprintf(stderr, "[!] %s : already reached time! (%lu %lu vs. %lu %lu)\n",
+				desc, diff.tv_sec, diff.tv_usec, sec, usec);
 		exit(1); // EWW
+	}
+	if (usec > 0 && diff.tv_usec >= usec) {
+		fprintf(stderr, "[!] %s : already reached time! (%lu %lu vs. %lu %lu) adding a second...\n",
+				desc, diff.tv_sec, diff.tv_usec, sec, usec);
+		pstart->tv_sec++;
 	}
 
 	for (;;) {
