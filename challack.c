@@ -90,7 +90,6 @@ typedef struct thctx_struct {
 	int ipoff;
 	conn_t conn_legit;
 	conn_t conn_spoof;
-	struct sockaddr_in *cli;
 	uint16_t winsz; // initial TCP window size
 } thctx_t;
 
@@ -1218,7 +1217,6 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 
 						/* fill in most of the context */
 						g_ctx.pch = pch;
-						g_ctx.cli = pcli;
 
 						if (!conduct_offpath_attack())
 							return 1;
