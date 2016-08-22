@@ -483,19 +483,13 @@ int sync_time_with_remote(void)
 
 		/* did we sync?? */
 		if (chack_cnt[round] == 100) {
-			if (round == 2) {
-				/* verify... */
-				round++;
-				continue;
-			}
-			else if (round == 3) {
+			if (round == 3) {
 				/* verified! */
 				printf("[*] Time synchronization complete!\n");
 				return 1;
 			}
-
-			/* we got luck! verify... */
-			round = 2;
+			/* we got lucky! verify... */
+			round = 3;
 			continue;
 		}
 
