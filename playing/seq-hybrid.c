@@ -162,6 +162,41 @@ block_t *build_schedule(u_long start, u_long end, int *pnblocks)
 }
 
 
+block_t *build_schedule_reverse(u_long start, u_long end, int *pnblocks)
+{
+	int i, j, num, nblocks, block_sz = PACKETS_PER_ROUND;
+	block_t *schedule = NULL;
+
+	num = end - start;
+	if (num <= block_sz) {
+		fprintf(stderr, "WTF? don't call build_schedule_reverse with this shit!\n");
+		return NULL;
+	}
+	nblocks = (num / block_sz) + 1;
+
+	//printf("  block_sz: %d\n", block_sz);
+
+	schedule = (block_t *)malloc(sizeof(block_t) * nblocks);
+	if (!schedule) {
+		perror("malloc");
+		return NULL;
+	}
+
+	j = nblocks - 1;
+	for (i = 0; i < nblocks; i++) {
+		schedule[i].start = start + (j * block_sz);
+		schedule[i].end = start + ((j + 1) * block_sz);
+		if (schedule[i].end > end)
+			schedule[i].end = end;
+		j--;
+		//printf("  schedule[%d]: %lu - %lu\n", i, (u_long)schedule[i].start, (u_long)schedule[i].end);
+	}
+
+	*pnblocks = nblocks;
+	return schedule;
+}
+
+
 int hybrid_search(u_long start, u_long end)
 {
 	int num, found;
@@ -174,19 +209,11 @@ int hybrid_search(u_long start, u_long end)
 		int nblocks, i;
 		block_t *round_schedule;
 
-		round_schedule = build_schedule(start, end, &nblocks);
-		if (!round_schedule) {
-			return 0;
-		}
-
 		/* reverse the order of the schedule as higher values are more likely
 		 * to be correct */
-		for (i = 0; i < nblocks / 2; i++) {
-			block_t tmp;
-
-			tmp = round_schedule[i];
-			round_schedule[i] = round_schedule[nblocks - i - 1];
-			round_schedule[nblocks - i - 1] = tmp;
+		round_schedule = build_schedule_reverse(start, end, &nblocks);
+		if (!round_schedule) {
+			return 0;
 		}
 
 		++rounds;
