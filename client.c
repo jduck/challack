@@ -14,6 +14,8 @@
 #include <netdb.h>
 
 #include <sys/time.h>
+#include <sys/select.h>
+
 
 #ifndef LOCAL_PORT
 #define LOCAL_PORT 37373
@@ -30,6 +32,7 @@ int main(int argc, char *argv[])
 	int sd, port = 80;
 	struct sockaddr_in srv;
 	const char *request = "HEAD / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n";
+	int request_made = 0;
 	int reqlen;
 
 	reqlen = strlen(request);
@@ -59,39 +62,62 @@ int main(int argc, char *argv[])
 		gettimeofday(&connected, NULL);
 		printf("[*] connected from port %u to %s:%d on sd %d\n", LOCAL_PORT, argv[1], port, sd);
 
+		requested.tv_sec = connected.tv_sec - 59;
+
 		while (1) {
 			ssize_t nrw;
 			char buf[1048576];
+			int sret;
+			fd_set rfds;
 
-			/* write the request */
-			gettimeofday(&requested, NULL);
-			printf("    sending request...\n");
-			nrw = write(sd, request, reqlen);
-			if (nrw != reqlen) {
-				if (nrw < 0)
-					perror("write");
-				else
-					printf("short write (%d)!\n", (int)nrw);
-				break;
+			/* write the request every so often */
+			gettimeofday(&now, NULL);
+			timersub(&now, &requested, &diff);
+			if (diff.tv_sec >= 59) {
+				printf("    sending request...\n");
+				nrw = write(sd, request, reqlen);
+				if (nrw != reqlen) {
+					if (nrw < 0)
+						perror("write");
+					else
+						printf("short write (%d)!\n", (int)nrw);
+					break;
+				}
+				gettimeofday(&requested, NULL);
+				request_made = 1;
 			}
 			
-			/* read the response */
-			nrw = read(sd, buf, sizeof(buf));
-			if (nrw > 0) {
-				gettimeofday(&now, NULL);
-				timersub(&now, &requested, &diff);
-				printf("    read %d bytes of data in %lu %lu seconds\n", (int)nrw, diff.tv_sec, diff.tv_usec);
-				memcpy(&requested, &now, sizeof(requested));
-				sleep(59);
-				gettimeofday(&now, NULL);
-				timersub(&now, &requested, &diff);
-				printf("    slept %lu %lu seconds.\n", diff.tv_sec, diff.tv_usec);
-			} else {
-				if (nrw < 0)
-					perror("read");
-				else
-					printf("connection closed?!\n");
+			/* see if we should read the response */
+			FD_ZERO(&rfds);
+			FD_SET(sd, &rfds);
+			diff.tv_sec = 1;
+			diff.tv_usec = 0;
+			sret = select(sd + 1, &rfds, NULL, NULL, &diff);
+			if (sret == -1) {
+				perror("select");
 				break;
+			}
+
+			if (sret > 0) {
+				nrw = read(sd, buf, sizeof(buf));
+				if (nrw > 0) {
+					gettimeofday(&now, NULL);
+					timersub(&now, &requested, &diff);
+					printf("    read %d bytes of data in %lu %lu seconds\n", (int)nrw, diff.tv_sec, diff.tv_usec);
+					if (!request_made) {
+						printf("unexpected data:\n");
+						write(fileno(stdout), buf, nrw);
+					}
+					else
+						 request_made = 0;
+					memcpy(&requested, &now, sizeof(requested));
+				} else {
+					if (nrw < 0)
+						perror("read");
+					else
+						printf("connection closed?!\n");
+					break;
+				}
 			}
 		}
 
