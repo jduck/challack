@@ -145,7 +145,9 @@ int tcp_send(pcap_t *pch, volatile conn_t *pconn, u_char flags,
 		char *data, size_t len);
 int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags,
 		uint32_t *pack, uint32_t *pseq, void **pdata, size_t *plen);
+#ifdef DEBUG_SEQ
 char *tcp_flags(u_char flags);
+#endif
 
 void setterm(int mode);
 int kbhit(void);
@@ -2199,6 +2201,7 @@ int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, uint32_t
 }
 
 
+#ifdef DEBUG_SEQ
 /*
  * return a string showing which flags are set in the TCP packet
  *
@@ -2229,6 +2232,7 @@ char *tcp_flags(u_char flags)
 	*ptr++ = '\0';
 	return str;
 }
+#endif
 
 
 /*
