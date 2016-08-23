@@ -939,14 +939,7 @@ int infer_four_tuple(void)
 				}
 				test_mode = 2;
 			} else if (test_mode == 2) {
-				/* if we only sent one guess this time, we won! */
-				if (bs_start == bs_end) {
-					// XXX: is this ever actually reached??
-					/* special handling for hinted guess?? */
-					printf("[*] Confirmed client port (eh?): %lu\n", bs_start);
-					spoof->src.sin_port = ntohs(bs_start);
-					return 1;
-				} else if (bs_end - bs_mid == 1) {
+				if (bs_end - bs_mid == 1) {
 					/* we legitimately guessed it via binary search! */
 					printf("[*] Guessed client port (via binary search): %lu\n", bs_mid);
 					spoof->src.sin_port = ntohs(bs_mid);
