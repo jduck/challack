@@ -756,9 +756,10 @@ int sync_time_with_remote(void)
 /*
  * build a test schedule based on the start and end of a range
  */
-chunk_t *build_schedule(u_long start, u_long end, int *pnchunks)
+chunk_t *build_schedule(u_long start, u_long end, u_long chunk_sz, int *pnchunks)
 {
-	int i, num, nchunks, chunk_sz = g_ctx.packets_per_second;
+	int i, nchunks;
+	u_long num;
 	chunk_t *schedule = NULL;
 
 	num = end - start;
@@ -789,9 +790,10 @@ chunk_t *build_schedule(u_long start, u_long end, int *pnchunks)
 /*
  * build a test schedule based on the start and end of a range (reverse order)
  */
-chunk_t *build_schedule_reverse(u_long start, u_long end, int *pnchunks)
+chunk_t *build_schedule_reverse(u_long start, u_long end, u_long chunk_sz, int *pnchunks)
 {
-	int i, j, num, nchunks, chunk_sz = g_ctx.packets_per_second;
+	int i, j, nchunks;
+	u_long num;
 	chunk_t *schedule = NULL;
 
 	num = end - start;
@@ -876,7 +878,7 @@ int infer_four_tuple(void)
 				 * ... "the default range on Linux is only from 32768 to 61000"
 				 */
 				// XXX: TODO: scale number of guesses per round based on feedback
-				sched = build_schedule(32768, 61000, &nchunks);
+				sched = build_schedule(32768, 61000, g_ctx.packets_per_second, &nchunks);
 				if (!sched)
 					return 0;
 
@@ -1049,9 +1051,12 @@ int infer_sequence_number(void)
 			step = 0;
 
 			if (g_ctx.start_seq)
-				sched = build_schedule(g_ctx.start_seq / g_ctx.winsz, UINT32_MAX / g_ctx.winsz, &nchunks);
+				sched = build_schedule(g_ctx.start_seq / g_ctx.winsz,
+						UINT32_MAX / g_ctx.winsz, g_ctx.packets_per_second,
+						&nchunks);
 			else
-				sched = build_schedule(0, UINT32_MAX / g_ctx.winsz, &nchunks);
+				sched = build_schedule(0, UINT32_MAX / g_ctx.winsz,
+						g_ctx.packets_per_second, &nchunks);
 			if (!sched)
 				return 0;
 			/* further stages will launch as things progress */
@@ -1206,7 +1211,8 @@ int infer_sequence_number(void)
 
 						/* build a schedule working from right to left */
 						sched = build_schedule_reverse(seq_block - g_ctx.winsz,
-								seq_block + g_ctx.winsz, &nchunks);
+								seq_block + g_ctx.winsz, g_ctx.packets_per_second,
+								&nchunks);
 						if (!sched)
 							return 0;
 						ci = 0;
