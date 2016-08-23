@@ -1429,6 +1429,12 @@ int infer_ack_number(void)
 
 	gettimeofday(&infer_start, NULL);
 
+	if (g_ctx.start_ack) {
+		bs_start = g_ctx.start_ack - (g_ctx.winsz / 2);
+		bs_end = g_ctx.start_ack + (g_ctx.winsz / 2);
+		step = 1;
+	}
+
 	while (1) {
 		gettimeofday(&round_start, NULL);
 
