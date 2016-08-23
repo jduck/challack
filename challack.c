@@ -1038,9 +1038,6 @@ int infer_sequence_number(void)
 	/* binary search vars */
 	u_long bs_start = 0, bs_end = 0, bs_mid = 0;
 
-	uint32_t seq_nblocks = UINT32_MAX / g_ctx.winsz;
-	uint32_t seq_block = 0, seq_last_block = 0;
-
 	while (1) {
 		gettimeofday(&round_start, NULL);
 
