@@ -1636,7 +1636,7 @@ int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, uint32_t
 	}
 	ptcp = (struct tcphdr *)ptr;
 	if (!g_ctx.winsz) {
-		g_ctx.winsz = ntohs(ptcp->th_win / 2);
+		g_ctx.winsz = ntohs(ptcp->th_win);
 		printf("[*] TCP Window size: %u\n", g_ctx.winsz);
 	}
 	tcplen = ptcp->th_off * 4;
