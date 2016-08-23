@@ -1378,11 +1378,13 @@ int infer_sequence_number(void)
 {
 	u_long guess_start = 0, guess_end = UINT32_MAX;
 
-	if (g_ctx.start_seq)
-		guess_start = g_ctx.start_seq;
-
-	if (!infer_sequence_step1(&guess_start, &guess_end))
-		return 0;
+	if (g_ctx.start_seq) {
+		guess_start = g_ctx.start_seq - g_ctx.winsz;
+		guess_end = g_ctx.start_seq + g_ctx.winsz;
+	} else {
+		if (!infer_sequence_step1(&guess_start, &guess_end))
+			return 0;
+	}
 
 	if (!infer_sequence_step2(&guess_start, &guess_end))
 		return 0;
