@@ -243,12 +243,12 @@ int main(int argc, char *argv[])
 					char *buf = slurp(optarg, &len);
 
 					if (!buf) {
-						fprintf(stderr, "[!] unable to load server inject data from \"%s\"\n", optarg);
+						fprintf(stderr, "[!] unable to load client inject data from \"%s\"\n", optarg);
 						return 1;
 					}
-					g_ctx.inject_server = buf;
-					g_ctx.inject_server_len = len;
-					srvfn = optarg;
+					g_ctx.inject_client = buf;
+					g_ctx.inject_client_len = len;
+					clifn = optarg;
 				}
 				break;
 
@@ -258,12 +258,12 @@ int main(int argc, char *argv[])
 					char *buf = slurp(optarg, &len);
 
 					if (!buf) {
-						fprintf(stderr, "[!] unable to load client inject data from \"%s\"\n", optarg);
+						fprintf(stderr, "[!] unable to load server inject data from \"%s\"\n", optarg);
 						return 1;
 					}
-					g_ctx.inject_client = buf;
-					g_ctx.inject_client_len = len;
-					clifn = optarg;
+					g_ctx.inject_server = buf;
+					g_ctx.inject_server_len = len;
+					srvfn = optarg;
 				}
 				break;
 
