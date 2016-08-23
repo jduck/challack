@@ -1027,7 +1027,7 @@ int infer_four_tuple(void)
  */
 int infer_sequence_number(void)
 {
-	struct timeval round_start, now, diff;
+	struct timeval round_start;
 	volatile conn_t *spoof = &(g_ctx.spoof);
 	int step = -1;
 	/* printing status */
@@ -1262,17 +1262,18 @@ int infer_sequence_number(void)
  */
 int infer_ack_number(void)
 {
-	struct timeval round_start, now, diff;
+	struct timeval round_start;
 	volatile conn_t *spoof = &(g_ctx.spoof);
 	int step = -1;
 	/* printing status */
 	u_long pr_start, pr_end, pkts_sent;
+#if 0
 	/* chunk-based search vars */
 	chunk_t *sched = NULL;
 	int nchunks = 0, ci = 0;
 	/* binary search vars */
 	u_long bs_start = 0, bs_end = 0, bs_mid = 0;
-
+#endif
 	u_long g_acks[4] = { 0, 0x40000000, 0x80000000, 0xc0000000 };
 	int g_chacks[4] = { 0 };
 	int ai = 0;
@@ -1288,8 +1289,6 @@ int infer_ack_number(void)
 
 		/* send packets depending on the step we're in */
 		if (step == 0) {
-			u_long g;
-
 			/* send 0G, 1G, 2G, and 3G data packets */
 			pkts_sent = 0;
 			pr_start = g_acks[ai];
