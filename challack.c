@@ -389,6 +389,12 @@ int main(int argc, char *argv[])
 	if (g_ctx.spoof.seq)
 		printf("    spoofed sequence: %lu (0x%lx)\n", (u_long)g_ctx.spoof.seq,
 				(u_long)g_ctx.spoof.seq);
+	if (g_ctx.spoof.ack)
+		printf("    spoofed ack: %lu (0x%lx)\n", (u_long)g_ctx.spoof.ack,
+				(u_long)g_ctx.spoof.ack);
+	if (g_ctx.start_seq)
+		printf("    starting with sequence: %lu (0x%lx)\n", g_ctx.start_seq,
+				g_ctx.start_seq);
 	if (g_ctx.packets_per_second != PACKETS_PER_SECOND)
 		printf("    packets per second: %lu\n", g_ctx.packets_per_second);
 	if (g_ctx.packet_delay != PACKET_DELAY)
