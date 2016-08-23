@@ -9,7 +9,7 @@ For detailed information, consult the original publication:
 # Requirements
 
 1. You need to be able to spoof packets (no egress filtering).
-2. You'll need to update *ROUTER_MAC* and *LOCAL_MAC* in *router.h* with your spoof-ready machine's details.
+2. You'll need to update *ROUTER_MAC* and *LOCAL_MAC* in *challack.c* with your spoof-ready machine's details.
 2. You need to use iptables to DROP packets from the target host/port.  Otherwise, your legitimate TCP stack will interfere with this program's operation. You can do that by executing something like the following:
 
 ```

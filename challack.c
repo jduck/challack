@@ -42,8 +42,13 @@
 /* threading */
 #include <pthread.h>
 
-#include "router.h"
+#ifndef ROUTER_MAC
+#define ROUTER_MAC "\x01\x02\x03\x04\x05\x06"
+#endif
 
+#ifndef LOCAL_MAC
+#define LOCAL_MAC "\xaa\xbb\xcc\xdd\xee\xff"
+#endif
 
 /*
  * if DEVICE is not defined, we'll try to find a suitable device..
