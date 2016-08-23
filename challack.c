@@ -315,7 +315,7 @@ int main(int argc, char *argv[])
 					u_long tmp = strtoul(optarg, &pend, 0);
 
 					if (!pend || *pend) {
-						fprintf(stderr, "invalid spoof sequence number: %s\n", optarg);
+						fprintf(stderr, "invalid start sequence number: %s\n", optarg);
 						return 1;
 					}
 					g_ctx.start_seq = tmp;
