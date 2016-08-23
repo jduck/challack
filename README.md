@@ -1,6 +1,6 @@
 # Proof-of-concept code for CVE-2016-5696
 
-This code currently allows reseting connections only. Injection is yet to be implemented.
+This code currently allows reseting connections or injecting into sessions.
 
 For detailed information, consult the original publication:
 
