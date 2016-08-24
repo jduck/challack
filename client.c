@@ -89,6 +89,7 @@ int main(int argc, char *argv[])
 			
 			/* see if we should read the response */
 			FD_ZERO(&rfds);
+			FD_SET(fileno(stdout), &rfds);
 			FD_SET(sd, &rfds);
 			diff.tv_sec = 1;
 			diff.tv_usec = 0;
@@ -99,24 +100,31 @@ int main(int argc, char *argv[])
 			}
 
 			if (sret > 0) {
-				nrw = read(sd, buf, sizeof(buf));
-				if (nrw > 0) {
-					gettimeofday(&now, NULL);
-					timersub(&now, &requested, &diff);
-					printf("    read %d bytes of data in %lu %lu seconds\n", (int)nrw, diff.tv_sec, diff.tv_usec);
-					if (!request_made) {
-						printf("unexpected data:\n");
-						write(fileno(stdout), buf, nrw);
+				if (FD_ISSET(fileno(stdout), &rfds)) {
+					/* force a request */
+					nrw = read(fileno(stdin), buf, sizeof(buf));
+					requested.tv_sec -= 59;
+				}
+				if (FD_ISSET(sd, &rfds)) {
+					nrw = read(sd, buf, sizeof(buf));
+					if (nrw > 0) {
+						gettimeofday(&now, NULL);
+						timersub(&now, &requested, &diff);
+						printf("    read %d bytes of data in %lu %lu seconds\n", (int)nrw, diff.tv_sec, diff.tv_usec);
+						if (!request_made) {
+							printf("unexpected data:\n");
+							write(fileno(stdout), buf, nrw);
+						}
+						else
+							 request_made = 0;
+						memcpy(&requested, &now, sizeof(requested));
+					} else {
+						if (nrw < 0)
+							perror("read");
+						else
+							printf("connection closed?!\n");
+						break;
 					}
-					else
-						 request_made = 0;
-					memcpy(&requested, &now, sizeof(requested));
-				} else {
-					if (nrw < 0)
-						perror("read");
-					else
-						printf("connection closed?!\n");
-					break;
 				}
 			}
 		}
