@@ -1125,7 +1125,7 @@ int infer_sequence_step1(u_long *pstart, u_long *pend)
 		/* get the number of challenge ACKs within this second */
 		wait_until("seq-infer recv", &round_start, 1, 0);
 
-		printf("[*] seq-infer: guessed seqs [%08lx - %08lx): %lu packets, %3d challenge ACKs\n",
+		printf("[*] seq-infer (1): guessed seqs [%08lx - %08lx): %lu packets, %3d challenge ACKs\n",
 				pr_start, pr_end, pkts_sent, g_chack_cnt);
 
 		/* adjust the search based on the results and mode */
@@ -1227,7 +1227,7 @@ int infer_sequence_step2(u_long *pstart, u_long *pend)
 		/* get the number of challenge ACKs within this second */
 		wait_until("seq-infer recv", &round_start, 1, 0);
 
-		printf("[*] seq-infer: guessed seqs [%08lx - %08lx): %lu packets, %3d challenge ACKs\n",
+		printf("[*] seq-infer (2): guessed seqs [%08lx - %08lx): %lu packets, %3d challenge ACKs\n",
 				pr_start, pr_end, pkts_sent, g_chack_cnt);
 
 		/* figure out which chunk exactly! */
@@ -1341,7 +1341,7 @@ int infer_sequence_step3(u_long *pstart, u_long *pend, int use_data)
 		/* get the number of challenge ACKs within this second */
 		wait_until("seq-infer recv", &round_start, 1, 0);
 
-		printf("[*] seq-infer: guessed seqs [%08lx - %08lx): %lu packets, %3d challenge ACKs\n",
+		printf("[*] seq-infer (3): guessed seqs [%08lx - %08lx): %lu packets, %3d challenge ACKs\n",
 				pr_start, pr_end, pkts_sent, g_chack_cnt);
 
 		if (g_chack_cnt == 100) {
@@ -1493,11 +1493,11 @@ int infer_ack_number(void)
 		wait_until("ack-infer recv", &round_start, 1, 0);
 
 		if (step == 0)
-			printf("[*] ack-infer: guessed acks [%08lx - %08lx): %3d challenge ACKs\n",
-					pr_start, pr_end, g_chack_cnt);
+			printf("[*] ack-infer (1): guessed acks [%08lx - %08lx]: %3d challenge ACKs\n",
+					pr_start, (pr_end - 1) & 0xffffffff, g_chack_cnt);
 		else if (step == 1)
-			printf("[*] ack-infer: guessed acks [%08lx - %08lx): %lu possibilities, %3d challenge ACKs\n",
-					pr_start, pr_end, (pr_end - pr_start), g_chack_cnt);
+			printf("[*] ack-infer (2): guessed acks [%08lx - %08lx]: %lu possibilities, %3d challenge ACKs\n",
+					pr_start, pr_end - 1, (pr_end - pr_start), g_chack_cnt);
 
 		/* adjust the search based on the results and mode */
 		if (step == 0) {
