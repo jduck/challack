@@ -1148,16 +1148,8 @@ int infer_sequence_step1(u_long *pstart, u_long *pend)
 
 			/* adjust winsz if g_chack_cnt < 99 */
 			if (g_chack_cnt < 99) {
-				u_long tmp, old;
-
-				old = g_ctx.winsz;
-				tmp = old * 2;
-				printf("[*] NOTE: Window size too conservative, doubling to %lu...\n", tmp);
-				g_ctx.winsz = tmp;
-
-				/* we need to fix the range to the new window size too */
-				*pstart = (*pstart * old) / tmp;
-				*pend = (*pend * old) / tmp;
+				g_ctx.winsz *= 2;
+				printf("[*] NOTE: Window size too conservative, doubling to %d...\n", g_ctx.winsz);
 			}
 
 			/* reset the schedule */
