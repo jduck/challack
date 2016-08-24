@@ -109,8 +109,8 @@ typedef struct thctx_struct {
 	int autostart;
 	u_long packets_per_second;
 	u_long packet_delay;
-	u_long start_seq;
-	u_long start_ack;
+	uint32_t start_seq;
+	uint32_t start_ack;
 	/* inject? */
 	char *inject_server;
 	off_t inject_server_len;
@@ -318,7 +318,7 @@ int main(int argc, char *argv[])
 					char *pend = NULL;
 					u_long tmp = strtoul(optarg, &pend, 0);
 
-					if (!pend || *pend) {
+					if (!pend || *pend || tmp > UINT32_MAX) {
 						fprintf(stderr, "invalid start sequence number: %s\n", optarg);
 						return 1;
 					}
@@ -331,7 +331,7 @@ int main(int argc, char *argv[])
 					char *pend = NULL;
 					u_long tmp = strtoul(optarg, &pend, 0);
 
-					if (!pend || *pend) {
+					if (!pend || *pend || tmp > UINT32_MAX) {
 						fprintf(stderr, "invalid spoof ack number: %s\n", optarg);
 						return 1;
 					}
@@ -410,8 +410,11 @@ int main(int argc, char *argv[])
 		printf("    spoofed ack: %lu (0x%lx)\n", (u_long)g_ctx.spoof.ack,
 				(u_long)g_ctx.spoof.ack);
 	if (g_ctx.start_seq)
-		printf("    starting with sequence: %lu (0x%lx)\n", g_ctx.start_seq,
-				g_ctx.start_seq);
+		printf("    starting with sequence: %lu (0x%lx)\n",
+				(u_long)g_ctx.start_seq, (u_long)g_ctx.start_seq);
+	if (g_ctx.start_ack)
+		printf("    starting with ack: %lu (0x%lx)\n",
+				(u_long)g_ctx.start_ack, (u_long)g_ctx.start_ack);
 	if (g_ctx.packets_per_second != PACKETS_PER_SECOND)
 		printf("    packets per second: %lu\n", g_ctx.packets_per_second);
 	if (g_ctx.packet_delay != PACKET_DELAY)
