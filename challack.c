@@ -1246,11 +1246,12 @@ int infer_sequence_step2(u_long *pstart, u_long *pend)
 			if (pkts_sent == 1) {
 				u_long seq_block = bs_mid * g_ctx.winsz;
 
+				gettimeofday(&now, NULL);
+				timersub(&now, &infer_start, &diff);
+
 				/* if we want to inject, we go to stage 3 directly */
 				if (g_ctx.inject_server || g_ctx.inject_client) {
 					/* return so the caller will work towards injection */
-					gettimeofday(&now, NULL);
-					timersub(&now, &infer_start, &diff);
 					printf("[*] Found in-window sequence number: %lu (after %lu %lu)\n",
 							seq_block, diff.tv_sec, diff.tv_usec);
 					g_ctx.spoof.seq = seq_block;
@@ -1262,8 +1263,6 @@ int infer_sequence_step2(u_long *pstart, u_long *pend)
 
 					/* return so the caller will work towards resetting the
 					 * connection */
-					gettimeofday(&now, NULL);
-					timersub(&now, &infer_start, &diff);
 					printf("[*] Narrowed sequence (2) to: %lu - %lu, %lu possibilities (after %lu %lu)\n",
 							*pstart, *pend, (u_long)g_ctx.winsz * 2,
 							diff.tv_sec, diff.tv_usec);
