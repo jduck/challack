@@ -10,11 +10,7 @@ For detailed information, consult the original publication:
 
 1. You need to be able to spoof packets (no egress filtering).
 2. You'll need to update *ROUTER_MAC* and *LOCAL_MAC* in *challack.c* with your spoof-ready machine's details.
-2. You need to use iptables to DROP packets from the target host/port.  Otherwise, your legitimate TCP stack will interfere with this program's operation. You can do that by executing something like the following:
-
-```
-# iptables -A INPUT -j DROP -p tcp -s [server addr] --sport [server port]
-```
+2. You need iptables installed to DROP packets from the target host/port.  Otherwise, your legitimate TCP stack will interfere with this program's operation.  This will appear as an immediate RST after connection establishment.
 
 # DEMO Session Excerpt
 

