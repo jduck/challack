@@ -197,6 +197,7 @@ void usage(char *argv0)
 			"-r <rate>      max packets per second\n"
 			"-s <sequence>  skip to this number when starting sequence inference\n"
 			"-S <sequence>  spoofed client sequence number\n"
+			"-w <winsz>     assume the specified window size\n"
 			// time offset? (to avoid sync_time_with_remote)
 			"-a <sequence>  skip to this number when starting ack inference\n"
 			"-A <sequence>  spoofed client ack number\n");
@@ -239,7 +240,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	while ((c = getopt(argc, argv, "a:d:ghI:i:P:p:r:S:s:A:")) != -1) {
+	while ((c = getopt(argc, argv, "a:d:ghI:i:P:p:r:S:s:A:w:")) != -1) {
 		switch (c) {
 			case '?':
 			case 'h':
@@ -348,6 +349,17 @@ int main(int argc, char *argv[])
 				}
 				break;
 
+			case 'w':
+				{
+					int winsz = atoi(optarg);
+					if (winsz < 1 || winsz > 65535) {
+						fprintf(stderr, "[!] %s is not a valid window size.\n", optarg);
+						return 1;
+					}
+					g_ctx.winsz = winsz;
+				}
+				break;
+
 			case 'A':
 				{
 					char *pend = NULL;
@@ -447,6 +459,8 @@ int main(int argc, char *argv[])
 	if (clifn)
 		printf("    attempting to inject %lu bytes to the client from \"%s\"\n",
 				g_ctx.inject_client_len, clifn);
+	if (g_ctx.winsz)
+		printf("    tcp window size: %u\n", g_ctx.winsz);
 
 	/* here we go.. WOOO */
 	ret = set_up_attack();
