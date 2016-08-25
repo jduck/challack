@@ -1344,6 +1344,7 @@ int infer_sequence_step2(u_long *pstart, u_long *pend)
 					printf("[*] Narrowed sequence (2) to: %lu - %lu, %lu possibilities (after %lu %lu)\n",
 							*pstart, *pend, (u_long)g_ctx.winsz * 2,
 							diff.tv_sec, diff.tv_usec);
+					g_chack_cnt = 0;
 					return 1;
 				}
 			}
