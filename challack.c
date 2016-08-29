@@ -695,7 +695,7 @@ int prepare_rst_packet(packet_t *ppkt)
 	memcpy(ppkt->buf, ROUTER_MAC LOCAL_MAC "\x08\x00", g_ctx.ipoff);
 
 	/* craft the packet! */
-	if (!tcp_craft(ppkt->buf + g_ctx.ipoff, &(ppkt->len), legit, TH_RST, "x", 1))
+	if (!tcp_craft(ppkt->buf + g_ctx.ipoff, &(ppkt->len), legit, TH_RST, "z", 1))
 		return 0;
 
 	/* adjust the length to include the phys part */
