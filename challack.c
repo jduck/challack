@@ -1336,8 +1336,8 @@ int infer_sequence_step2(u_long *pstart, u_long *pend)
 					g_chack_cnt = 0;
 					return 1;
 				} else {
-					*pstart = seq_block - g_ctx.winsz;
-					*pend = seq_block + g_ctx.winsz;
+					*pstart = seq_block - (g_ctx.winsz / 2);
+					*pend = seq_block + (g_ctx.winsz / 2);
 
 					/* return so the caller will work towards resetting the
 					 * connection */
