@@ -143,7 +143,7 @@ int sync_time_with_remote(void);
 int infer_four_tuple(void);
 int infer_sequence_step1(u_long *pstart, u_long *pend);
 int infer_sequence_step2(u_long *pstart, u_long *pend);
-int infer_sequence_step3(u_long *pstart, u_long *pend);
+int infer_sequence_step3_rst(u_long *pstart, u_long *pend);
 int infer_sequence_step3_ack(u_long *pstart, u_long *pend);
 int infer_sequence_number(void);
 int infer_ack_number(void);
@@ -1362,7 +1362,7 @@ int infer_sequence_step2(u_long *pstart, u_long *pend)
 	return 0;
 }
 
-int infer_sequence_step3(u_long *pstart, u_long *pend)
+int infer_sequence_step3_rst(u_long *pstart, u_long *pend)
 {
 	struct timeval infer_start, round_start, now, diff;
 	volatile conn_t *spoof = &(g_ctx.spoof);
@@ -1572,7 +1572,7 @@ int infer_sequence_number(void)
 	if (g_ctx.inject_server || g_ctx.inject_client)
 		return 1;
 
-	if (!infer_sequence_step3(&guess_start, &guess_end))
+	if (!infer_sequence_step3_rst(&guess_start, &guess_end))
 		return 0;
 
 	/* we must have reset the connection now, right? */
