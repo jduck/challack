@@ -164,7 +164,7 @@ block_t *build_schedule(u_long start, u_long end, int *pnblocks)
 
 block_t *build_schedule_reverse(u_long start, u_long end, int *pnblocks)
 {
-	int i, j, num, nblocks, block_sz = PACKETS_PER_ROUND;
+	int i, num, nblocks, block_sz = PACKETS_PER_ROUND;
 	block_t *schedule = NULL;
 
 	num = end - start;
@@ -182,14 +182,15 @@ block_t *build_schedule_reverse(u_long start, u_long end, int *pnblocks)
 		return NULL;
 	}
 
-	j = nblocks - 1;
 	for (i = 0; i < nblocks; i++) {
-		schedule[i].start = start + (j * block_sz);
-		schedule[i].end = start + ((j + 1) * block_sz);
+		if ((u_long)((i + 1) * block_sz) > end)
+			schedule[i].start = start;
+		else
+			schedule[i].start = end - ((i + 1) * block_sz);
+		schedule[i].end = end - (i * block_sz);
 		if (schedule[i].end > end)
 			schedule[i].end = end;
-		j--;
-		//printf("  schedule[%d]: %lu - %lu\n", i, (u_long)schedule[i].start, (u_long)schedule[i].end);
+		//printf("  REV schedule[%d]: %lu - %lu\n", i, (u_long)schedule[i].start, (u_long)schedule[i].end);
 	}
 
 	*pnblocks = nblocks;

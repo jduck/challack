@@ -904,7 +904,7 @@ chunk_t *build_schedule(u_long start, u_long end, u_long chunk_sz, int *pnchunks
  */
 chunk_t *build_schedule_reverse(u_long start, u_long end, u_long chunk_sz, int *pnchunks)
 {
-	int i, j, nchunks;
+	int i, nchunks;
 	u_long num;
 	chunk_t *schedule = NULL;
 
@@ -921,14 +921,13 @@ chunk_t *build_schedule_reverse(u_long start, u_long end, u_long chunk_sz, int *
 		return NULL;
 	}
 
-	// XXX: TODO: fill the schedule properly, starting from the end - chunksz
-	j = nchunks - 1;
+	/* fill the schedule starting from the end */
 	for (i = 0; i < nchunks; i++) {
-		schedule[i].start = start + (j * chunk_sz);
-		schedule[i].end = start + ((j + 1) * chunk_sz);
-		if (schedule[i].end > end)
-			schedule[i].end = end;
-		j--;
+		if ((u_long)((i + 1) * chunk_sz) > end)
+			schedule[i].start = start;
+		else
+			schedule[i].start = end - ((i + 1) * chunk_sz);
+		schedule[i].end = end - (i * chunk_sz);
 	}
 
 	*pnchunks = nchunks;
