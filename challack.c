@@ -1614,9 +1614,9 @@ int infer_ack_number(void)
 		/* convert start_ack into something that should be beyond the left side
 		 * of the challenge ACK window. */
 		start_ack = end_ack = g_ctx.start_ack - (g_acks[2] - 1);
-		start_ack -= (g_ctx.winsz * 5);
+		start_ack -= (g_ctx.winsz * 3);
 		bs_start = start_ack;
-		end_ack += (g_ctx.winsz * 3);
+		end_ack += (g_ctx.winsz * 2);
 		bs_end = end_ack;
 		step = 1;
 	}
