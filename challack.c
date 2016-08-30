@@ -715,38 +715,29 @@ int prepare_rst_packet(packet_t *ppkt)
 void wait_until(const char *desc, struct timeval *pstart, time_t sec, suseconds_t usec)
 {
 	struct timeval now, diff;
-
-	/* sanity check usage... */
-	if (sec != 0 && usec != 0) {
-		fprintf(stderr, "[!] %s : bad usage! specify sec or usec, not both! (%lu && %lu)\n",
-				desc, sec, usec);
-		(void)unblock_traffic();
-		exit(1); // EWW
-	}
+	uint64_t wait_time = usec + (sec * 1000000);
+	uint64_t waited = 0;
 
 	/* if we already reached the time, we need to adjust... */
 	gettimeofday(&now, NULL);
 	timersub(&now, pstart, &diff);
-
-	if (sec > 0 && diff.tv_sec >= sec) {
+	waited = diff.tv_usec + (diff.tv_sec * 1000000);
+#ifdef DEBUG_WAIT_UNTIL
+	printf("    waiting %lu, already waited %lu...\n", wait_time, waited);
+#endif
+	if (waited > wait_time) {
 		fprintf(stderr, "[!] %s : already reached time! (%lu %lu vs. %lu %lu)\n",
 				desc, diff.tv_sec, diff.tv_usec, sec, usec);
 		(void)unblock_traffic();
 		exit(1); // EWW
-	}
-	if (usec > 0 && diff.tv_usec >= usec) {
-		fprintf(stderr, "[!] %s : already reached time! (%lu %lu vs. %lu %lu) adding a second...\n",
-				desc, diff.tv_sec, diff.tv_usec, sec, usec);
-		pstart->tv_sec++;
 	}
 
 	for (;;) {
 		usleep(250);
 		gettimeofday(&now, NULL);
 		timersub(&now, pstart, &diff);
-		if (sec > 0 && diff.tv_sec >= sec)
-			break;
-		if (usec > 0 && diff.tv_usec >= usec)
+		waited = diff.tv_usec + (diff.tv_sec * 1000000);
+		if (waited >= wait_time)
 			break;
 	}
 #ifdef DEBUG_WAIT_UNTIL
@@ -789,8 +780,9 @@ int sync_time_with_remote(void)
 		/* send 200 RSTs, spaced evenly */
 		if (!send_packets_delay(&g_rst_pkt, 200, 5000))
 			return 0;
-		gettimeofday(&now, NULL);
+
 #ifdef DEBUG_SYNC_SEND_TIME
+		gettimeofday(&now, NULL);
 		timersub(&now, &round_start, &diff);
 		printf("  send took %lu %lu\n", diff.tv_sec, diff.tv_usec);
 #endif
@@ -799,7 +791,7 @@ int sync_time_with_remote(void)
 		wait_until("time-sync recv", &round_start, 2, 0);
 
 		/* the delay before next round starts here.. */
-		memcpy(&start, &now, sizeof(start));
+		gettimeofday(&start, NULL);
 
 		/* record the number of challenge acks seen */
 		chack_cnt[round] = g_chack_cnt;
