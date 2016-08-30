@@ -204,9 +204,19 @@ void usage(char *argv0)
 			// time offset? (to avoid sync_time_with_remote)
 			"-a <sequence>  skip to this number when starting ack inference\n"
 			"-A <sequence>  spoofed client ack number\n");
-	// XXX: support range for ports/sequence values?
 }
 
+
+int validate_port(char *str)
+{
+	int port = atoi(str);
+
+	if (port < 1 || port > 65535) {
+		fprintf(stderr, "[!] %s is not a valid port.\n", str);
+		return -1;
+	}
+	return port;
+}
 
 /*
  * The main function of this program simply checks prelimary arguments and
@@ -257,11 +267,8 @@ int main(int argc, char *argv[])
 				break;
 
 			case 'c':
-				client_mode = atoi(optarg);
-				if (client_mode < 1 || client_mode > 65535) {
-					fprintf(stderr, "[!] %s is not a valid port.\n", optarg);
+				if ((client_mode = validate_port(optarg)) == -1)
 					return 1;
-				}
 				break;
 
 			case 'd':
@@ -308,19 +315,13 @@ int main(int argc, char *argv[])
 				break;
 
 			case 'p':
-				cliport = atoi(optarg);
-				if (cliport < 1 || cliport > 65535) {
-					fprintf(stderr, "[!] %s is not a valid port.\n", optarg);
+				if ((cliport = validate_port(optarg)) == -1)
 					return 1;
-				}
 				break;
 
 			case 'P':
-				altport = atoi(optarg);
-				if (altport < 1 || altport > 65535) {
-					fprintf(stderr, "[!] %s is not a valid port.\n", optarg);
+				if ((altport = validate_port(optarg)) == -1)
 					return 1;
-				}
 				break;
 
 			case 'r':
@@ -430,11 +431,8 @@ int main(int argc, char *argv[])
 	g_ctx.spoof.src = sin;
 
 	/* validate and record the server port */
-	srvport = atoi(argv[1]);
-	if (srvport < 1 || srvport > 65535) {
-		fprintf(stderr, "[!] %s is not a valid port.\n", argv[1]);
+	if ((srvport = validate_port(argv[1])) == -1)
 		return 1;
-	}
 	g_ctx.legit.dst.sin_port = htons((uint16_t)srvport);
 	if (client_mode == -1)
 		g_ctx.spoof.dst.sin_port = htons((uint16_t)srvport);
